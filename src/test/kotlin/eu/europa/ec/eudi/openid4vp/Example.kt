@@ -19,6 +19,7 @@ import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.ECKey
+import com.nimbusds.jose.jwk.JWK
 import com.nimbusds.jose.jwk.RSAKey
 import com.nimbusds.jose.util.Base64URL
 import com.nimbusds.jwt.JWTClaimsSet
@@ -45,6 +46,7 @@ import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.time.Clock
 import java.util.*
+import kotlin.test.assertEquals
 import eu.europa.ec.eudi.openid4vp.dcql.DCQL as DCQLQuery
 
 /**
@@ -66,6 +68,9 @@ suspend fun HttpClient.program() {
         walletConfig = walletConfig(
             Preregistered(Verifier.asPreregisteredClient(verifierApi)),
             X509SanDns(TrustAnyX509),
+            SupportedClientIdPrefix.DecentralizedIdentifier {
+                ecKeyFromJwkJson().toECPublicKey()
+            }
         ),
         httpClient = this@program,
     )
@@ -89,6 +94,20 @@ suspend fun HttpClient.program() {
     runUseCase(Transaction.MsoMdocPidDcql)
     runUseCase(Transaction.SdJwtVcPidDcql)
     runUseCase(Transaction.SdJwtVcEhicDcql)
+}
+
+fun ecKeyFromJwkJson(): ECKey {
+    val jwkJson = """
+        {
+          "kty":"EC",
+          "x":"ijVgOGHvwHSeV1Z2iLF9pQLQAw7KcHF3VIjThhvVtBQ",
+          "y":"SfFShWAUGEnNx24V2b5G1jrhJNHmMwtgROBOi9OKJLc",
+          "crv":"P-256"
+        }
+    """.trimIndent()
+
+    // Parse directly from JSON
+    return JWK.parse(jwkJson) as ECKey
 }
 
 @Serializable
@@ -232,7 +251,7 @@ class Verifier private constructor(
             val request = iniTransactionResponse["request"]?.jsonPrimitive?.contentOrNull?.let { "request=$it" }
             require(request != null || requestUri != null)
             val requestPart = requestUri ?: request
-            return URI("eudi-wallet://authorize?client_id=$clientId&$requestPart")
+            return URI("openid4vp://?request_uri=https%3A%2F%2Fitb.ilabs.ai%2Frfc-issuer%2Fdid%2FVPrequest%2Fbdd01c39-d9da-4c71-8392-6696c486f6b4&client_id=decentralized_identifier%3Adid%3Aweb%3Aitb.ilabs.ai%3Arfc-issuer")
         }
 
         private fun randomNonce(): String = Nonce().value
@@ -365,13 +384,12 @@ private class Wallet(
         val credential = query.credentials.value.first()
         val verifiablePresentation = when (val format = credential.format.value) {
             "mso_mdoc" -> VerifiablePresentation.Generic(loadResource("/example/mso_mdoc_pid-deviceresponse.txt"))
-            "dc+sd-jwt" -> {
-                val vct = credential.metaSdJwtVc?.vctValues?.firstOrNull() ?: error("no vct found")
+            "dc+sd-jwt","vc+sd-jwt" -> {
                 prepareSdJwtVcVerifiablePresentation(
                     request.client,
                     request.nonce,
                     request.transactionData,
-                    vct = vct,
+                    vct = "VerifiableCredential",
                 )
             }
 
@@ -455,6 +473,8 @@ private fun walletConfig(vararg supportedClientIdPrefix: SupportedClientIdPrefix
                     issuerAuthAlgorithms = listOf(CoseAlgorithm(-7)),
                     deviceAuthAlgorithms = listOf(CoseAlgorithm(-7)),
                 ),
+
+                VpFormatsSupported.VCSdJwtVc.HAIP
             ),
             supportedTransactionDataTypes = listOf(
                 SupportedTransactionDataType.SdJwtVc(
@@ -476,7 +496,7 @@ private fun walletConfig(vararg supportedClientIdPrefix: SupportedClientIdPrefix
             ),
         ),
         responseEncryptionConfiguration = ResponseEncryptionConfiguration.Supported(
-            supportedAlgorithms = listOf(JWEAlgorithm.ECDH_ES),
+            supportedAlgorithms = listOf(JWEAlgorithm.ECDH_ES, JWEAlgorithm.ECDH_ES_A256KW),
             supportedMethods = listOf(EncryptionMethod.A128GCM),
         ),
         supportedClientIdPrefixes = supportedClientIdPrefix,
