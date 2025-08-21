@@ -319,10 +319,11 @@ value class CoseAlgorithm(val value: Int) : java.io.Serializable {
 data class VpFormatsSupported(
     @SerialName(OpenId4VPSpec.FORMAT_SD_JWT_VC) val sdJwtVc: SdJwtVc? = null,
     @SerialName(OpenId4VPSpec.FORMAT_MSO_MDOC) val msoMdoc: MsoMdoc? = null,
-) : java.io.Serializable {
+    @SerialName(OpenId4VPSpec.FORMAT_VC_SD_JWT_VC) val vcSdJwtVc: VCSdJwtVc? = null,
+    ) : java.io.Serializable {
 
     init {
-        require(null != sdJwtVc || null != msoMdoc) {
+        require(null != sdJwtVc || null != msoMdoc || null != vcSdJwtVc) {
             "At least one format must be specified."
         }
     }
@@ -358,6 +359,34 @@ data class VpFormatsSupported(
     }
 
     @Serializable
+    data class VCSdJwtVc(
+        @SerialName(OpenId4VPSpec.SD_JWT_VC_SD_JWT_ALGORITHMS)
+        val sdJwtAlgorithms: List<JWSAlgorithm>?,
+
+        @SerialName(OpenId4VPSpec.SD_JWT_VC_KB_JWT_ALGORITHMS)
+        val kbJwtAlgorithms: List<JWSAlgorithm>?,
+
+        ) : java.io.Serializable {
+        init {
+            sdJwtAlgorithms?.let {
+                require(it.isNotEmpty()) { "SD-JWT algorithms cannot be empty" }
+            }
+            kbJwtAlgorithms?.let {
+                require(it.isNotEmpty()) { "KeyBinding-JWT algorithms cannot be empty" }
+            }
+        }
+
+        companion object {
+            val HAIP: VCSdJwtVc
+                get() =
+                    VCSdJwtVc(
+                        sdJwtAlgorithms = listOf(JWSAlgorithm.ES256),
+                        kbJwtAlgorithms = listOf(JWSAlgorithm.ES256),
+                    )
+        }
+    }
+
+    @Serializable
     data class MsoMdoc(
         @SerialName(OpenId4VPSpec.MSO_MDOC_ISSUERAUTH_ALGORITHMS) val issuerAuthAlgorithms: List<CoseAlgorithm>?,
         @SerialName(OpenId4VPSpec.MSO_MDOC_DEVICEAUTH_ALGORITHMS) val deviceAuthAlgorithms: List<CoseAlgorithm>?,
@@ -380,6 +409,8 @@ internal fun VpFormatsSupported.containsAll(formats: Collection<Format>): Boolea
         when (it) {
             Format.SdJwtVc -> null != sdJwtVc
             Format.MsoMdoc -> null != msoMdoc
+            Format.VCSdJwtVc -> null != vcSdJwtVc
+
             else -> false
         }
     }
@@ -388,4 +419,5 @@ internal fun VpFormatsSupported.filter(formats: Collection<Format>): VpFormatsSu
     VpFormatsSupported(
         sdJwtVc = sdJwtVc?.takeIf { Format.SdJwtVc in formats },
         msoMdoc = msoMdoc?.takeIf { Format.MsoMdoc in formats },
+        vcSdJwtVc = vcSdJwtVc?.takeIf { Format.VCSdJwtVc in formats },
     )

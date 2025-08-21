@@ -147,6 +147,7 @@ internal class RequestObjectValidator(private val siopOpenId4VPConfig: SiopOpenI
         }
 
         val queryFormats = query.credentials.value.map { it.format }.toSet()
+
         ensure(walletSupportsVpFormats.containsAll(queryFormats)) {
             UnsupportedQueryFormats.asException()
         }

@@ -237,11 +237,42 @@ private fun resolveCommonGround(
             }
         } else null
 
-    ensure(null != sdJwtVc || null != msoMdoc) {
+    val vcsdJwtVc =
+        if (null != verifierSupported.vcSdJwtVc) {
+            walletSupported.vcSdJwtVc?.let {
+                resolveCommonGround(walletSupported = it, verifierSupported = verifierSupported.vcSdJwtVc)
+            }
+        } else null
+
+    ensure(null != sdJwtVc || null != msoMdoc || null != vcsdJwtVc) {
         ResolutionError.ClientVpFormatsNotSupportedFromWallet.asException()
     }
 
-    return VpFormatsSupported(sdJwtVc, msoMdoc)
+    return VpFormatsSupported(sdJwtVc, msoMdoc, vcsdJwtVc)
+}
+
+private fun resolveCommonGround(
+    walletSupported: VpFormatsSupported.VCSdJwtVc,
+    verifierSupported: VpFormatsSupported.VCSdJwtVc,
+): VpFormatsSupported.VCSdJwtVc {
+    fun common(
+        walletSupported: List<JWSAlgorithm>?,
+        verifierSupported: List<JWSAlgorithm>?,
+    ): List<JWSAlgorithm>? =
+        when {
+            null != walletSupported && null != verifierSupported -> {
+                val common = walletSupported.intersect(verifierSupported).toList().takeIf { it.isNotEmpty() }
+                ensureNotNull(common) {
+                    ResolutionError.ClientVpFormatsNotSupportedFromWallet.asException()
+                }
+            }
+
+            else -> verifierSupported ?: walletSupported
+        }
+
+    val sdJwtAlgorithms = common(walletSupported.sdJwtAlgorithms, verifierSupported.sdJwtAlgorithms)
+    val kbJwtAlgorithms = common(walletSupported.kbJwtAlgorithms, verifierSupported.kbJwtAlgorithms)
+    return VpFormatsSupported.VCSdJwtVc(sdJwtAlgorithms = sdJwtAlgorithms, kbJwtAlgorithms = kbJwtAlgorithms)
 }
 
 private fun resolveCommonGround(

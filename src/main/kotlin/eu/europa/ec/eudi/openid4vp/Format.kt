@@ -29,6 +29,7 @@ value class Format(val value: String) {
     companion object {
         val MsoMdoc: Format get() = Format(OpenId4VPSpec.FORMAT_MSO_MDOC)
         val SdJwtVc: Format get() = Format(OpenId4VPSpec.FORMAT_SD_JWT_VC)
+        val VCSdJwtVc: Format get() = Format(OpenId4VPSpec.FORMAT_VC_SD_JWT_VC)
         val W3CJwtVcJson: Format get() = Format(OpenId4VPSpec.FORMAT_W3C_SIGNED_JWT)
     }
 }
