@@ -28,7 +28,6 @@ import com.nimbusds.openid.connect.sdk.Nonce
 import com.nimbusds.openid.connect.sdk.claims.IDTokenClaimsSet
 import eu.europa.ec.eudi.openid4vp.SupportedClientIdPrefix.Preregistered
 import eu.europa.ec.eudi.openid4vp.SupportedClientIdPrefix.X509SanDns
-import eu.europa.ec.eudi.openid4vp.dcql.metaSdJwtVc
 import eu.europa.ec.eudi.openid4vp.internal.base64UrlNoPadding
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
 import io.ktor.client.*
@@ -93,7 +92,6 @@ suspend fun HttpClient.program() {
     runUseCase(Transaction.SIOP)
     runUseCase(Transaction.MsoMdocPidDcql)
     runUseCase(Transaction.SdJwtVcPidDcql)
-    runUseCase(Transaction.SdJwtVcEhicDcql)
 }
 
 fun ecKeyFromJwkJson(): ECKey {
@@ -302,11 +300,6 @@ sealed interface Transaction {
 
             OpenId4VP(PresentationQuery(dcql), listOf(transactionData))
         }
-
-        val SdJwtVcEhicDcql = run {
-            val dcql = jsonSupport.decodeFromString<DCQLQuery>(loadResource("/example/sd-jwt-vc-ehic-dcql-query.json"))
-            OpenId4VP(PresentationQuery(dcql))
-        }
     }
 }
 
@@ -384,15 +377,6 @@ private class Wallet(
         val credential = query.credentials.value.first()
         val verifiablePresentation = when (val format = credential.format.value) {
             "mso_mdoc" -> VerifiablePresentation.Generic(loadResource("/example/mso_mdoc_pid-deviceresponse.txt"))
-            "dc+sd-jwt","vc+sd-jwt" -> {
-                prepareSdJwtVcVerifiablePresentation(
-                    request.client,
-                    request.nonce,
-                    request.transactionData,
-                    vct = "VerifiableCredential",
-                )
-            }
-
             else -> error("unsupported format $format")
         }
 
@@ -409,14 +393,9 @@ private class Wallet(
         audience: Client,
         nonce: String,
         transactionData: List<TransactionData>?,
-        vct: String? = null,
     ): VerifiablePresentation.Generic {
-        val (sdJwtVc, holderKey) = when (vct) {
-            "urn:eudi:ehic:1" ->
-                loadResource("/example/sd-jwt-vc-ehic.txt") to ECKey.parse(loadResource("/example/sd-jwt-vc-ehic-key.json"))
-            else ->
-                loadResource("/example/sd-jwt-vc-pid.txt") to ECKey.parse(loadResource("/example/sd-jwt-vc-pid-key.json"))
-        }
+        val sdJwtVc = loadResource("/example/sd-jwt-vc-pid.txt")
+        val holderKey = ECKey.parse(loadResource("/example/sd-jwt-vc-pid-key.json"))
         check(holderKey.isPrivate) { "a private key is required" }
 
         val sdHash = run {
