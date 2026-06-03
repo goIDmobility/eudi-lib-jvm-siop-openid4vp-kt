@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ import eu.europa.ec.eudi.openid4vp.dcql.*
 import eu.europa.ec.eudi.openid4vp.dcql.ClaimPathElement.Claim
 import eu.europa.ec.eudi.openid4vp.internal.request.ClientMetaDataValidator
 import eu.europa.ec.eudi.openid4vp.internal.request.UnvalidatedClientMetaData
-import eu.europa.ec.eudi.openid4vp.internal.request.asURL
+import eu.europa.ec.eudi.openid4vp.internal.request.asHttpsURL
 import eu.europa.ec.eudi.openid4vp.internal.response.DefaultDispatcherTest.Verifier.assertIsJwtEncryptedWithVerifiersPublicKey
 import io.ktor.client.*
 import io.ktor.client.engine.mock.*
@@ -94,7 +94,7 @@ class DefaultDispatcherTest {
             unvalidatedClientMetaData: UnvalidatedClientMetaData,
             responseMode: ResponseMode,
             state: String? = null,
-        ): ResolvedRequestObject.OpenId4VPAuthorization {
+        ): ResolvedRequestObject {
             val query = DCQL(
                 credentials = Credentials(
                     CredentialQuery.sdJwtVc(
@@ -112,7 +112,7 @@ class DefaultDispatcherTest {
                     Wallet.config.vpConfiguration.vpFormatsSupported,
                 )
 
-            return ResolvedRequestObject.OpenId4VPAuthorization(
+            return ResolvedRequestObject(
                 query = query,
                 responseEncryptionSpecification = clientMetadataValidated.responseEncryptionSpecification,
                 vpFormatsSupported = VpFormatsSupported(
@@ -136,7 +136,7 @@ class DefaultDispatcherTest {
     //
 
     private object Wallet {
-        val config = SiopOpenId4VPConfig(
+        val config = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(SupportedClientIdPrefix.X509SanDns.NoValidation),
             responseEncryptionConfiguration = ResponseEncryptionConfiguration.Supported(
                 supportedAlgorithms = listOf(Verifier.responseEncryptionKeyPair.algorithm as JWEAlgorithm),
@@ -228,14 +228,14 @@ class DefaultDispatcherTest {
         fun `if response type direct_post jwt, JWE should be returned if only encryption info specified`() = runTest {
             val verifierRequest = Verifier.createOpenId4VPRequest(
                 Verifier.metaDataRequestingEncryptedResponse,
-                ResponseMode.DirectPostJwt("https://respond.here".asURL().getOrThrow()),
+                ResponseMode.DirectPostJwt("https://respond.here".asHttpsURL().getOrThrow()),
             )
 
             suspend fun test(
                 verifiablePresentations: List<VerifiablePresentation>,
                 redirectUri: URI? = null,
             ) {
-                val vpTokenConsensus = Consensus.PositiveConsensus.VPTokenConsensus(
+                val vpTokenConsensus = Consensus.PositiveConsensus(
                     VerifiablePresentations(
                         mapOf(
                             QueryId("psId") to verifiablePresentations,
@@ -277,7 +277,7 @@ class DefaultDispatcherTest {
             runTest {
                 val verifierRequest = Verifier.createOpenId4VPRequest(
                     Verifier.metaDataRequestingEncryptedResponse,
-                    ResponseMode.DirectPostJwt("https://respond.here".asURL().getOrThrow()),
+                    ResponseMode.DirectPostJwt("https://respond.here".asHttpsURL().getOrThrow()),
                 )
 
                 val negativeConsensus = Consensus.NegativeConsensus
@@ -303,10 +303,10 @@ class DefaultDispatcherTest {
         @Test
         fun `support vp_token with multiple verifiable presentations`() = runTest {
             suspend fun test(verifiablePresentations: VerifiablePresentations, redirectUri: URI? = null) {
-                val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asURL().getOrThrow())
+                val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asHttpsURL().getOrThrow())
                 val resolvedRequest =
                     Verifier.createOpenId4VPRequest(Verifier.metaDataRequestingEncryptedResponse, responseMode)
-                val vpTokenConsensus = Consensus.PositiveConsensus.VPTokenConsensus(
+                val vpTokenConsensus = Consensus.PositiveConsensus(
                     verifiablePresentations = verifiablePresentations,
                 )
 
@@ -338,15 +338,7 @@ class DefaultDispatcherTest {
                 val dispatcher = Wallet.createDispatcherWithVerifierAsserting(redirectUri) { responseParam ->
                     val jwtClaimsSet = responseParam.assertIsJwtEncryptedWithVerifiersPublicKey().jwtClaimsSet
                     when (consensus) {
-                        is Consensus.PositiveConsensus.VPTokenConsensus -> {
-                            assertEquals(
-                                consensus.verifiablePresentations.asJsonObject(),
-                                jwtClaimsSet.vpTokenClaim(),
-                            )
-                        }
-
-                        is Consensus.PositiveConsensus.IdAndVPTokenConsensus -> {
-                            assertNotNull(jwtClaimsSet.claims["id_token"], "Expected id_token")
+                        is Consensus.PositiveConsensus -> {
                             assertEquals(
                                 consensus.verifiablePresentations.asJsonObject(),
                                 jwtClaimsSet.vpTokenClaim(),
@@ -366,28 +358,16 @@ class DefaultDispatcherTest {
                 assertEquals(expectedOutcome, outcome)
             }
 
-            val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asURL().getOrThrow())
+            val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asHttpsURL().getOrThrow())
             test(
                 createOpenID4VPRequestWithDCQL(Verifier.metaDataRequestingEncryptedResponse, responseMode),
-                Consensus.PositiveConsensus.VPTokenConsensus(dcqlVpTokenWithGenericPresentation()),
-            )
-            test(
-                createOpenID4VPRequestWithDCQL(Verifier.metaDataRequestingEncryptedResponse, responseMode),
-                Consensus.PositiveConsensus.VPTokenConsensus(dcqlVpTokenWithGenericPresentation()),
-            )
-            test(
-                createSiopOpenID4VPRequestWithDCQL(Verifier.metaDataRequestingEncryptedResponse, responseMode),
-                Consensus.PositiveConsensus.IdAndVPTokenConsensus("dummy_jwt", dcqlVpTokenWithGenericPresentation()),
-            )
-            test(
-                createSiopOpenID4VPRequestWithDCQL(Verifier.metaDataRequestingEncryptedResponse, responseMode),
-                Consensus.PositiveConsensus.IdAndVPTokenConsensus("dummy_jwt", dcqlVpTokenWithJsonPresentation()),
+                Consensus.PositiveConsensus(dcqlVpTokenWithGenericPresentation()),
             )
         }
 
         @Test
         fun `unencrypted errors are sent when using direct_post_jwt`() = runTest {
-            val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asURL().getOrThrow())
+            val responseMode = ResponseMode.DirectPostJwt("https://respond.here".asHttpsURL().getOrThrow())
             val error = ResolutionError.UnknownScope(Scope.OpenId)
             val state = genState()
             val errorDispatchDetails = ErrorDispatchDetails(
@@ -463,7 +443,7 @@ class DefaultDispatcherTest {
         private fun createOpenID4VPRequestWithDCQL(
             unvalidatedClientMetaData: UnvalidatedClientMetaData,
             responseMode: ResponseMode.DirectPostJwt,
-        ): ResolvedRequestObject.OpenId4VPAuthorization {
+        ): ResolvedRequestObject {
             val query = DCQL(
                 credentials = Credentials(
                     testCredentialQuery(),
@@ -478,7 +458,7 @@ class DefaultDispatcherTest {
                     Wallet.config.vpConfiguration.vpFormatsSupported,
                 )
 
-            return ResolvedRequestObject.OpenId4VPAuthorization(
+            return ResolvedRequestObject(
                 query = query,
                 responseEncryptionSpecification = clientMetadataValidated.responseEncryptionSpecification,
                 vpFormatsSupported = VpFormatsSupported(
@@ -491,41 +471,6 @@ class DefaultDispatcherTest {
                 nonce = "0S6_WzA2Mj",
                 responseMode = responseMode,
                 state = genState(),
-                transactionData = null,
-                verifierInfo = null,
-            )
-        }
-
-        private fun createSiopOpenID4VPRequestWithDCQL(
-            unvalidatedClientMetaData: UnvalidatedClientMetaData,
-            responseMode: ResponseMode.DirectPostJwt,
-        ): ResolvedRequestObject.SiopOpenId4VPAuthentication {
-            val query = DCQL(Credentials(testCredentialQuery()))
-            val clientMetadataValidated =
-                ClientMetaDataValidator.validateClientMetaData(
-                    unvalidatedClientMetaData,
-                    responseMode,
-                    query,
-                    Wallet.config.responseEncryptionConfiguration,
-                    Wallet.config.vpConfiguration.vpFormatsSupported,
-                )
-
-            return ResolvedRequestObject.SiopOpenId4VPAuthentication(
-                client = Verifier.CLIENT,
-                responseMode = responseMode,
-                state = genState(),
-                nonce = "0S6_WzA2Mj",
-                responseEncryptionSpecification = clientMetadataValidated.responseEncryptionSpecification,
-                vpFormatsSupported = VpFormatsSupported(
-                    msoMdoc = VpFormatsSupported.MsoMdoc(
-                        issuerAuthAlgorithms = listOf(CoseAlgorithm(-7)),
-                        deviceAuthAlgorithms = listOf(CoseAlgorithm(-7)),
-                    ),
-                ),
-                idTokenType = listOf(IdTokenType.SubjectSigned),
-                subjectSyntaxTypesSupported = listOf(SubjectSyntaxType.DecentralizedIdentifier("")),
-                scope = Scope.OpenId,
-                query = query,
                 transactionData = null,
                 verifierInfo = null,
             )
@@ -642,71 +587,12 @@ class DefaultDispatcherTest {
         }
 
         @Test
-        fun `when response for SIOPAuthentication, redirect_uri must contain an id_token query parameter`() {
-            fun test(state: String? = null, asserter: URI.(URI.() -> Unit) -> Unit) {
-                val data = AuthorizationResponsePayload.SiopAuthentication(
-                    "dummy",
-                    generateNonce(),
-                    state,
-                    VerifierId(ClientIdPrefix.PreRegistered, "client_id"),
-                    EncryptionParameters.DiffieHellman(Base64URL.encode("dummy_apu")),
-                )
-                val response = AuthorizationResponse.Query(redirectUriBase, data)
-                val redirectURI = response.encodeRedirectURI()
-
-                redirectURI.asserter {
-                    assertEquals(data.idToken, getQueryParameter("id_token"))
-                }
-            }
-
-            genState().let { state -> test(state) { assertQueryURIContainsStateAnd(state, it) } }
-            test { assertQueryURIDoesNotContainStateAnd(it) }
-        }
-
-        @Test
-        fun `when response mode is query_jwt, redirect_uri must contain a 'response' query parameter`() {
-            fun test(state: String? = null, asserter: URI.(URI.() -> Unit) -> Unit) {
-                val data = AuthorizationResponsePayload.SiopAuthentication(
-                    "dummy",
-                    generateNonce(),
-                    state,
-                    VerifierId(ClientIdPrefix.PreRegistered, "client_id"),
-                    EncryptionParameters.DiffieHellman(Base64URL.encode("dummy_apu")),
-                )
-                val response = AuthorizationResponse.QueryJwt(
-                    redirectUriBase,
-                    data,
-                    ResponseEncryptionSpecification(
-                        encryptionAlgorithm = Verifier.responseEncryptionKeyPair.algorithm as JWEAlgorithm,
-                        encryptionMethod = EncryptionMethod.parse(
-                            Verifier.metaDataRequestingEncryptedResponse.responseEncryptionMethodsSupported.orEmpty()
-                                .first(),
-                        ),
-                        recipientKey = Verifier.responseEncryptionKeyPair.toPublicJWK(),
-                    ),
-                )
-                val redirectURI = response.encodeRedirectURI()
-
-                redirectURI.asserter {
-                    val responseParameter = getQueryParameter("response")
-                    assertNotNull(responseParameter)
-                    val jwtClaimsSet = responseParameter.assertIsJwtEncryptedWithVerifiersPublicKey().jwtClaimsSet
-                    assertEquals(data.state, jwtClaimsSet.getClaim("state"))
-                    assertEquals(data.idToken, jwtClaimsSet.getClaim("id_token"))
-                }
-            }
-
-            test(genState()) { assertQueryURIDoesNotContainStateAnd(it) }
-            test { assertQueryURIDoesNotContainStateAnd(it) }
-        }
-
-        @Test
         fun `when query_jwt with encryption and negative consensus, redirect_uri must contain error ACCESS_DENIED in response`() =
             runTest {
                 suspend fun test(state: String? = null, asserter: URI.(URI.() -> Unit) -> Unit) {
                     val verifierRequest = Verifier.createOpenId4VPRequest(
                         Verifier.metaDataRequestingEncryptedResponse,
-                        ResponseMode.QueryJwt("https://respond.here".asURL().getOrThrow().toURI()),
+                        ResponseMode.QueryJwt("https://respond.here".asHttpsURL().getOrThrow().toURI()),
                         state,
                     )
 
@@ -834,96 +720,12 @@ class DefaultDispatcherTest {
         }
 
         @Test
-        fun `when SIOPAuthentication, fragment must contain an id_token`() {
-            fun test(state: String? = null, asserter: URI.((Map<String, String>) -> Unit) -> Unit) {
-                val data = AuthorizationResponsePayload.SiopAuthentication(
-                    "dummy",
-                    generateNonce(),
-                    state,
-                    VerifierId(ClientIdPrefix.PreRegistered, "client_id"),
-                    EncryptionParameters.DiffieHellman(Base64URL.encode("dummy_apu")),
-                )
-                val response = AuthorizationResponse.Fragment(redirectUri = redirectUriBase, data = data)
-                response.encodeRedirectURI()
-                    .asserter { fragmentData ->
-                        assertEquals(data.idToken, fragmentData["id_token"])
-                    }
-            }
-
-            genState().let { state -> test(state) { assertFragmentURIContainsStateAnd(state, it) } }
-            test { assertFragmentURIDoesNotContainStateAnd(it) }
-        }
-
-        @Test
-        fun `when SiopOpenId4VPAuthentication, fragment must contain an id_token`() {
-            fun test(state: String? = null, asserter: URI.((Map<String, String>) -> Unit) -> Unit) {
-                val data = AuthorizationResponsePayload.SiopOpenId4VPAuthentication(
-                    "dummy",
-                    VerifiablePresentations(
-                        mapOf(
-                            QueryId("my_credential") to listOf(VerifiablePresentation.Generic("dummy_vp_token")),
-                        ),
-                    ),
-                    generateNonce(),
-                    state,
-                    VerifierId(ClientIdPrefix.PreRegistered, "client_id"),
-                    EncryptionParameters.DiffieHellman(Base64URL.encode("dummy_apu")),
-                )
-                val response = AuthorizationResponse.Fragment(redirectUri = redirectUriBase, data = data)
-                response.encodeRedirectURI()
-                    .asserter { fragmentData ->
-                        assertEquals(data.idToken, fragmentData["id_token"])
-                    }
-            }
-
-            genState().let { state -> test(state) { assertFragmentURIContainsStateAnd(state, it) } }
-            test { assertFragmentURIDoesNotContainStateAnd(it) }
-        }
-
-        @Test
-        fun `when response mode is fragment_jwt, redirect_uri must contain a 'response' query parameter`() {
-            fun test(state: String? = null, asserter: URI.((Map<String, String>) -> Unit) -> Unit) {
-                val data = AuthorizationResponsePayload.SiopAuthentication(
-                    "dummy",
-                    generateNonce(),
-                    state,
-                    VerifierId(ClientIdPrefix.PreRegistered, "client_id"),
-                    EncryptionParameters.DiffieHellman(Base64URL.encode("dummy_apu")),
-                )
-                val response =
-                    AuthorizationResponse.FragmentJwt(
-                        redirectUri = redirectUriBase,
-                        data = data,
-                        responseEncryptionSpecification = ResponseEncryptionSpecification(
-                            encryptionAlgorithm = Verifier.responseEncryptionKeyPair.algorithm as JWEAlgorithm,
-                            encryptionMethod = EncryptionMethod.parse(
-                                Verifier.metaDataRequestingEncryptedResponse.responseEncryptionMethodsSupported.orEmpty()
-                                    .first(),
-                            ),
-                            recipientKey = Verifier.responseEncryptionKeyPair.toPublicJWK(),
-                        ),
-                    )
-                response.encodeRedirectURI()
-                    .asserter { fragmentData ->
-                        val responseParameter = fragmentData["response"]
-                        assertNotNull(responseParameter)
-                        val jwtClaimsSet = responseParameter.assertIsJwtEncryptedWithVerifiersPublicKey().jwtClaimsSet
-                        assertEquals(data.state, jwtClaimsSet.getClaim("state"))
-                        assertEquals(data.idToken, jwtClaimsSet.getClaim("id_token"))
-                    }
-            }
-
-            test(genState()) { assertFragmentURIDoesNotContainStateAnd(it) }
-            test { assertFragmentURIDoesNotContainStateAnd(it) }
-        }
-
-        @Test
         fun `when fragment_jwt with encryption and negative consensus, redirect_uri must contain ACCESS_DENIED in response`() =
             runTest {
                 suspend fun test(state: String? = null, asserter: URI.(URI.() -> Unit) -> Unit) {
                     val verifierRequest = Verifier.createOpenId4VPRequest(
                         Verifier.metaDataRequestingEncryptedResponse,
-                        ResponseMode.FragmentJwt("https://respond.here".asURL().getOrThrow().toURI()),
+                        ResponseMode.FragmentJwt("https://respond.here".asHttpsURL().getOrThrow().toURI()),
                         state,
                     )
 

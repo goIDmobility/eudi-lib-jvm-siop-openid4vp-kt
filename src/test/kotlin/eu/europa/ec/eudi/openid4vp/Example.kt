@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 package eu.europa.ec.eudi.openid4vp
 
+import COSE.AlgorithmID
+import cbor.Cbor
 import com.nimbusds.jose.*
 import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.jwk.Curve
@@ -26,6 +28,18 @@ import com.nimbusds.openid.connect.sdk.Nonce
 import eu.europa.ec.eudi.openid4vp.SupportedClientIdPrefix.*
 import eu.europa.ec.eudi.openid4vp.internal.base64UrlNoPadding
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
+import id.walt.mdoc.COSECryptoProviderKeyInfo
+import id.walt.mdoc.SimpleCOSECryptoProvider
+import id.walt.mdoc.dataelement.EncodedCBORElement
+import id.walt.mdoc.dataelement.MapElement
+import id.walt.mdoc.dataelement.NullElement
+import id.walt.mdoc.dataelement.toDataElement
+import id.walt.mdoc.dataretrieval.DeviceResponse
+import id.walt.mdoc.devicesigned.DeviceAuth
+import id.walt.mdoc.devicesigned.DeviceSigned
+import id.walt.mdoc.doc.MDoc
+import id.walt.mdoc.issuersigned.IssuerSigned
+import id.walt.mdoc.mdocauth.DeviceAuthentication
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.request.*
@@ -33,6 +47,8 @@ import io.ktor.http.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromByteArray
+import kotlinx.serialization.encodeToByteArray
 import kotlinx.serialization.json.*
 import java.net.URI
 import java.net.URL
@@ -41,7 +57,7 @@ import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.time.Clock
 import java.util.*
-import kotlin.test.assertEquals
+import kotlin.io.encoding.Base64
 import eu.europa.ec.eudi.openid4vp.dcql.DCQL as DCQLQuery
 
 /**
@@ -81,20 +97,6 @@ suspend fun HttpClient.program() {
 
     runUseCase(Transaction.MsoMdocPidDcql)
     runUseCase(Transaction.SdJwtVcPidDcql)
-}
-
-fun ecKeyFromJwkJson(): ECKey {
-    val jwkJson = """
-        {
-          "kty":"EC",
-          "x":"ijVgOGHvwHSeV1Z2iLF9pQLQAw7KcHF3VIjThhvVtBQ",
-          "y":"SfFShWAUGEnNx24V2b5G1jrhJNHmMwtgROBOi9OKJLc",
-          "crv":"P-256"
-        }
-    """.trimIndent()
-
-    // Parse directly from JSON
-    return JWK.parse(jwkJson) as ECKey
 }
 
 @Serializable
@@ -211,7 +213,7 @@ class Verifier private constructor(
             val request = iniTransactionResponse["request"]?.jsonPrimitive?.contentOrNull?.let { "request=$it" }
             require(request != null || requestUri != null)
             val requestPart = requestUri ?: request
-            return URI("openid4vp://?request_uri=https%3A%2F%2Fitb.ilabs.ai%2Frfc-issuer%2Fdid%2FVPrequest%2Fbdd01c39-d9da-4c71-8392-6696c486f6b4&client_id=decentralized_identifier%3Adid%3Aweb%3Aitb.ilabs.ai%3Arfc-issuer")
+            return URI("eudi-wallet://authorize?client_id=$clientId&$requestPart")
         }
 
         private fun randomNonce(): String = Nonce().value
@@ -253,23 +255,23 @@ data class Transaction(
 }
 
 private class Wallet(
-    private val walletConfig: SiopOpenId4VPConfig,
+    private val walletConfig: OpenId4VPConfig,
     private val httpClient: HttpClient,
 ) {
-    private val siopOpenId4Vp: SiopOpenId4Vp by lazy {
-        SiopOpenId4Vp(walletConfig, httpClient)
+    private val openId4Vp: OpenId4Vp by lazy {
+        OpenId4Vp(walletConfig, httpClient)
     }
 
     suspend fun handle(uri: URI): DispatchOutcome {
         walletPrintln("Handling $uri ...")
         return withContext(Dispatchers.IO) {
-            siopOpenId4Vp.handle(uri.toString()) { holderConsent(it) }.also {
+            openId4Vp.handle(uri.toString()) { holderConsent(it) }.also {
                 walletPrintln("Response was sent to verifierApi which replied with $it")
             }
         }
     }
 
-    suspend fun SiopOpenId4Vp.handle(
+    suspend fun OpenId4Vp.handle(
         uri: String,
         holderConsensus: suspend (ResolvedRequestObject) -> Consensus,
     ): DispatchOutcome =
@@ -282,30 +284,30 @@ private class Wallet(
             }
         }
 
-    suspend fun holderConsent(request: ResolvedRequestObject): Consensus = withContext(Dispatchers.Default) {
-        when (request) {
-            is ResolvedRequestObject.OpenId4VPAuthorization -> handleOpenId4VP(request)
-            else -> Consensus.NegativeConsensus
-        }
-    }
+    suspend fun holderConsent(request: ResolvedRequestObject): Consensus =
+        withContext(Dispatchers.Default) {
+            val query = request.query
+            check(1 == query.credentials.value.size) { "found more than 1 credentials" }
+            val credential = query.credentials.value.first()
+            val verifiablePresentation = when (val format = credential.format.value) {
+                "mso_mdoc" -> prepareMsoMdocVerifiablePresentation(
+                    request.client,
+                    request.nonce,
+                    request.responseEncryptionSpecification,
+                    request.responseMode,
+                )
+                "dc+sd-jwt" -> prepareSdJwtVcVerifiablePresentation(request.client, request.nonce, request.transactionData)
+                else -> error("unsupported format $format")
+            }
 
-    private fun handleOpenId4VP(request: ResolvedRequestObject.OpenId4VPAuthorization): Consensus {
-        val query = request.query
-        check(1 == query.credentials.value.size) { "found more than 1 credentials" }
-        val credential = query.credentials.value.first()
-        val verifiablePresentation = when (val format = credential.format.value) {
-            "mso_mdoc" -> VerifiablePresentation.Generic(loadResource("/example/mso_mdoc_pid-deviceresponse.txt"))
-            else -> error("unsupported format $format")
-        }
-
-        return Consensus.PositiveConsensus.VPTokenConsensus(
-            verifiablePresentations = VerifiablePresentations(
-                value = mapOf(
-                    credential.id to listOf(verifiablePresentation),
+            Consensus.PositiveConsensus(
+                verifiablePresentations = VerifiablePresentations(
+                    value = mapOf(
+                        credential.id to listOf(verifiablePresentation),
+                    ),
                 ),
-            ),
-        )
-    }
+            )
+        }
 
     private fun prepareSdJwtVcVerifiablePresentation(
         audience: Client,
@@ -351,6 +353,82 @@ private class Wallet(
         return VerifiablePresentation.Generic("$sdJwtVc${keyBindingJwt.serialize()}")
     }
 
+    private fun prepareMsoMdocVerifiablePresentation(
+        audience: Client,
+        nonce: String,
+        responseEncryptionSpecification: ResponseEncryptionSpecification?,
+        responseMode: ResponseMode,
+    ): VerifiablePresentation.Generic {
+        val ephemeralEncryptionKey = responseEncryptionSpecification?.recipientKey
+
+        val responseUri = when (responseMode) {
+            is ResponseMode.DirectPost -> responseMode.responseURI.toString()
+            is ResponseMode.DirectPostJwt -> responseMode.responseURI.toString()
+            is ResponseMode.Fragment -> responseMode.redirectUri.toString()
+            is ResponseMode.FragmentJwt -> responseMode.redirectUri.toString()
+            is ResponseMode.Query -> responseMode.redirectUri.toString()
+            is ResponseMode.QueryJwt -> responseMode.redirectUri.toString()
+        }
+
+        val openID4VPHandoverInfo = listOf(
+            audience.id.clientId.toDataElement(),
+            nonce.toDataElement(),
+            ephemeralEncryptionKey?.computeThumbprint()?.decode()?.toDataElement() ?: NullElement(),
+            responseUri.toDataElement(),
+        ).toDataElement()
+        val openID4VPHandoverInfoBytes = Cbor.encodeToByteArray(openID4VPHandoverInfo)
+        val openID4VPHandoverInfoHash = MessageDigest.getInstance("SHA-256").digest(openID4VPHandoverInfoBytes)
+        val openID4VPHandover = listOf(
+            "OpenID4VPHandover".toDataElement(),
+            openID4VPHandoverInfoHash.toDataElement(),
+        ).toDataElement()
+
+        val sessionTranscript = listOf(
+            NullElement(),
+            NullElement(),
+            openID4VPHandover,
+        ).toDataElement()
+
+        val deviceNameSpaces = EncodedCBORElement(Cbor.encodeToByteArray(MapElement(emptyMap())))
+        val deviceAuthentication = DeviceAuthentication(sessionTranscript, "eu.europa.ec.eudi.pid.1", deviceNameSpaces)
+        val deviceAuthenticationBytes = EncodedCBORElement(Cbor.encodeToByteArray(deviceAuthentication))
+
+        val deviceKey = ECKey.parse(loadResource("/example/mso_mdoc_pid-devicekey.json"))
+        val cryptoProvider = SimpleCOSECryptoProvider(
+            listOf(
+                COSECryptoProviderKeyInfo(
+                    keyID = "device",
+                    algorithmID = AlgorithmID.ECDSA_256,
+                    publicKey = deviceKey.toECPublicKey(),
+                    privateKey = deviceKey.toECPrivateKey(),
+                    x5Chain = emptyList(),
+                    trustedRootCAs = emptyList(),
+                ),
+            ),
+        )
+        val deviceSignature = cryptoProvider.sign1(Cbor.encodeToByteArray(deviceAuthenticationBytes), null, null, "device")
+        val deviceSigned = DeviceSigned(
+            nameSpaces = deviceNameSpaces,
+            deviceAuth = DeviceAuth(
+                deviceMac = null,
+                deviceSignature = deviceSignature.detachPayload(),
+            ),
+        )
+
+        val base64 = Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT_OPTIONAL)
+        val issuerSigned = Cbor.decodeFromByteArray<IssuerSigned>(base64.decode(loadResource("/example/mso_mdoc_pid-issuersigned.txt")))
+
+        val document = MDoc(
+            docType = "eu.europa.ec.eudi.pid.1".toDataElement(),
+            issuerSigned = issuerSigned,
+            deviceSigned = deviceSigned,
+            errors = null,
+        )
+        val deviceResponse = DeviceResponse(listOf(document))
+
+        return VerifiablePresentation.Generic(base64.encode(Cbor.encodeToByteArray(deviceResponse)))
+    }
+
     companion object {
         fun walletPrintln(s: String) = println("Wallet   : $s")
     }
@@ -362,7 +440,7 @@ private val TrustAnyX509: (List<X509Certificate>) -> Boolean = { _ ->
 }
 
 private fun walletConfig(vararg supportedClientIdPrefix: SupportedClientIdPrefix) =
-    SiopOpenId4VPConfig(
+    OpenId4VPConfig(
         vpConfiguration = VPConfiguration(
             vpFormatsSupported = VpFormatsSupported(
                 VpFormatsSupported.SdJwtVc.HAIP,
@@ -370,8 +448,6 @@ private fun walletConfig(vararg supportedClientIdPrefix: SupportedClientIdPrefix
                     issuerAuthAlgorithms = listOf(CoseAlgorithm(-7)),
                     deviceAuthAlgorithms = listOf(CoseAlgorithm(-7)),
                 ),
-
-                VpFormatsSupported.VCSdJwtVc.HAIP
             ),
             supportedTransactionDataTypes = listOf(
                 SupportedTransactionDataType.SdJwtVc(
@@ -393,7 +469,7 @@ private fun walletConfig(vararg supportedClientIdPrefix: SupportedClientIdPrefix
             ),
         ),
         responseEncryptionConfiguration = ResponseEncryptionConfiguration.Supported(
-            supportedAlgorithms = listOf(JWEAlgorithm.ECDH_ES, JWEAlgorithm.ECDH_ES_A256KW),
+            supportedAlgorithms = listOf(JWEAlgorithm.ECDH_ES),
             supportedMethods = listOf(EncryptionMethod.A128GCM),
         ),
         supportedClientIdPrefixes = supportedClientIdPrefix,

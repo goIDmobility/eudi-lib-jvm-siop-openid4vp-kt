@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 package eu.europa.ec.eudi.openid4vp.internal.request
 
 import com.nimbusds.jose.JWEObject
-import com.nimbusds.jose.crypto.ECDHDecrypter
+import com.nimbusds.jose.crypto.factories.DefaultJWEDecrypterFactory
 import com.nimbusds.jose.jwk.ECKey
 import com.nimbusds.jose.jwk.KeyUse
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator
@@ -40,7 +40,7 @@ import java.text.ParseException
 
 internal class RequestFetcher(
     private val httpClient: HttpClient,
-    private val siopOpenId4VPConfig: SiopOpenId4VPConfig,
+    private val openId4VPConfig: OpenId4VPConfig,
 ) {
     /**
      * Fetches the authorization request, if needed
@@ -52,7 +52,7 @@ internal class RequestFetcher(
                 is UnvalidatedRequest.JwtSecured.PassByValue -> request.jwt to null
                 is UnvalidatedRequest.JwtSecured.PassByReference -> fetchJwtAndWalletNonce(request)
             }
-            with(siopOpenId4VPConfig) {
+            with(openId4VPConfig) {
                 ensureValid(expectedClient = request.clientId, expectedWalletNonce = walletNonce, unverifiedJwt = jwt)
             }
         }
@@ -64,47 +64,50 @@ internal class RequestFetcher(
         val (_, requestUri, requestUriMethod) = request
 
         val supportedMethods =
-            siopOpenId4VPConfig.jarConfiguration.supportedRequestUriMethods
+            openId4VPConfig.jarConfiguration.supportedRequestUriMethods
+        val postOptions = supportedMethods.isPostSupported()
+
+        suspend fun useGET(): Pair<Jwt, Nonce?> {
+            ensure(supportedMethods.isGetSupported()) {
+                unsupportedRequestUriMethod(RequestUriMethod.GET)
+            }
+            return httpClient.getJAR(requestUri) to null
+        }
+
+        suspend fun usePOST(): Pair<Jwt, Nonce?> {
+            ensureNotNull(postOptions) {
+                unsupportedRequestUriMethod(RequestUriMethod.POST)
+            }
+            val walletNonce =
+                when (val nonceOption = postOptions.useWalletNonce) {
+                    is NonceOption.Use -> Nonce(nonceOption.byteLength)
+                    NonceOption.DoNotUse -> null
+                }
+            val ephemeralJarEncryptionKey = when (val jarEncryption = postOptions.jarEncryption) {
+                EncryptionRequirement.NotRequired -> null
+                is EncryptionRequirement.Required -> jarEncryption.ephemeralEncryptionKey()
+            }
+            val walletMetaData =
+                if (postOptions.includeWalletMetadata) {
+                    walletMetaData(openId4VPConfig, request.clientId, listOfNotNull(ephemeralJarEncryptionKey))
+                } else null
+
+            val jwt = httpClient.postForJAR(requestUri, walletNonce, walletMetaData)
+            val signedJwt = if (postOptions.jarEncryption is EncryptionRequirement.Required) {
+                jwt.decrypt(ephemeralJarEncryptionKey!!, postOptions.jarEncryption).getOrThrow()
+            } else jwt
+
+            return signedJwt to walletNonce
+        }
 
         return when (requestUriMethod) {
-            null, RequestUriMethod.GET -> {
-                ensure(supportedMethods.isGetSupported()) {
-                    unsupportedRequestUriMethod(RequestUriMethod.GET)
-                }
-                httpClient.getJAR(requestUri) to null
-            }
-
-            RequestUriMethod.POST -> {
-                val postOptions =
-                    ensureNotNull(supportedMethods.isPostSupported()) {
-                        unsupportedRequestUriMethod(RequestUriMethod.POST)
-                    }
-                val walletNonce =
-                    when (val nonceOption = postOptions.useWalletNonce) {
-                        is NonceOption.Use -> Nonce(nonceOption.byteLength)
-                        NonceOption.DoNotUse -> null
-                    }
-                val ephemeralJarEncryptionKey = when (val jarEncryption = postOptions.jarEncryption) {
-                    EncryptionRequirement.NotRequired -> null
-                    is EncryptionRequirement.Required -> jarEncryption.ephemeralEncryptionKey()
-                }
-                val walletMetaData =
-                    if (postOptions.includeWalletMetadata) {
-                        walletMetaData(siopOpenId4VPConfig, listOfNotNull(ephemeralJarEncryptionKey))
-                    } else null
-
-                val jwt = httpClient.postForJAR(requestUri, walletNonce, walletMetaData)
-                val signedJwt = if (null != ephemeralJarEncryptionKey) {
-                    jwt.decrypt(ephemeralJarEncryptionKey).getOrThrow()
-                } else jwt
-
-                signedJwt to walletNonce
-            }
+            null, RequestUriMethod.GET -> useGET()
+            RequestUriMethod.POST -> if (postOptions != null) usePOST() else useGET()
         }
     }
 }
 
-private fun SiopOpenId4VPConfig.ensureValid(
+private fun OpenId4VPConfig.ensureValid(
     expectedClient: String,
     expectedWalletNonce: Nonce?,
     unverifiedJwt: Jwt,
@@ -131,7 +134,7 @@ private fun ensureSameWalletNonce(expectedWalletNonce: Nonce, signedJwt: SignedJ
     }
 }
 
-private fun SiopOpenId4VPConfig.ensureSupportedSigningAlgorithm(signedJwt: SignedJWT) {
+private fun OpenId4VPConfig.ensureSupportedSigningAlgorithm(signedJwt: SignedJWT) {
     val signingAlg = ensureNotNull(signedJwt.header.algorithm) {
         invalidJwt("JAR is missing alg claim from header")
     }
@@ -191,13 +194,20 @@ private fun HttpRequestBuilder.addAcceptContentTypeJwt() {
 
 private const val CONTENT_TYPE_JWT = "JWT"
 
-private fun Jwt.decrypt(recipientKey: ECKey): Result<Jwt> = runCatchingCancellable {
+private fun Jwt.decrypt(recipientKey: ECKey, jarEncryption: EncryptionRequirement.Required): Result<Jwt> = runCatchingCancellable {
     val jwe = JWEObject.parse(this)
     require(CONTENT_TYPE_JWT == jwe.header.contentType) { "JWEObject must contain a JWT Payload" }
-
-    val decrypter = ECDHDecrypter(recipientKey)
-    jwe.decrypt(decrypter)
-    val payload = jwe.payload
+    require(jarEncryption.supportedEncryptionAlgorithms.contains(jwe.header.algorithm)) {
+        "JWEObject must contain a supported encryption algorithm"
+    }
+    require(jarEncryption.supportedEncryptionMethods.contains(jwe.header.encryptionMethod)) {
+        "JWEObject must contain a supported encryption method"
+    }
+    val decrypter = DefaultJWEDecrypterFactory().createJWEDecrypter(jwe.header, recipientKey.toPrivateKey())
+    val payload = with(decrypter) {
+        jwe.decrypt(this)
+        jwe.payload
+    }
 
     payload.toString()
 }

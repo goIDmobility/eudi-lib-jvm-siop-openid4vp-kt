@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ import eu.europa.ec.eudi.openid4vp.*
 import eu.europa.ec.eudi.openid4vp.internal.AbsoluteDIDUrl
 import eu.europa.ec.eudi.openid4vp.internal.DID
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
@@ -47,7 +46,7 @@ class ClientAuthenticatorTest {
     @Nested
     inner class ClientAuthenticatorCommonTest {
 
-        private val cfg = SiopOpenId4VPConfig(
+        private val cfg = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(
                 SupportedClientIdPrefix.RedirectUri,
             ),
@@ -71,25 +70,13 @@ class ClientAuthenticatorTest {
                 clientAuthenticator.authenticateClient(request)
             }
         }
-
-        @Test
-        fun `if client_id prefix is invalid, authentication fails`() = runTest {
-            val request = UnvalidatedRequestObject(
-                clientId = "bar:foo",
-                responseMode = "bar",
-            ).unsigned()
-
-            assertFailsWithError<RequestValidationError.InvalidClientIdPrefix> {
-                clientAuthenticator.authenticateClient(request)
-            }
-        }
     }
 
     @DisplayName("when handling a request with `redirect_uri` prefix")
     @Nested
     inner class ClientAuthenticatorWhenUsingRedirectUriTest {
-        private val clientId = URI.create("http://localhost:8080")
-        private val cfg = SiopOpenId4VPConfig(
+        private val clientId = URI.create("https://localhost:8080")
+        private val cfg = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(
                 SupportedClientIdPrefix.RedirectUri,
             ),
@@ -128,6 +115,73 @@ class ClientAuthenticatorTest {
             }
             assertEquals("RedirectUri cannot be used in signed request", error.value)
         }
+
+        @Test
+        fun `if  redirect_uri is insecure, authentication fails`() = runTest {
+            val httpClientId = URI.create("http://localhost:8080")
+            val request = UnvalidatedRequestObject(
+                clientId = "redirect_uri:$httpClientId",
+            ).unsigned()
+
+            assertThrows<AuthorizationRequestException> { clientAuthenticator.authenticateClient(request) }
+        }
+    }
+
+    @DisplayName("when handling a request with pre-registered client")
+    @Nested
+    inner class ClientAuthenticatorWhenUsingPreRegisteredClientTest {
+        private val algAndKey = randomKey()
+        private val preRegisteredClient = PreregisteredClient(
+            "testPreRegistered",
+            "Test Pre-Registered Client",
+            algAndKey.first to JwkSetSource.ByValue(Json.decodeFromString(algAndKey.second.toString())),
+        )
+        private val preRegisteredClientFooBar = PreregisteredClient(
+            "foo:bar",
+            "Pre-Registered Client with : in client_id",
+            algAndKey.first to JwkSetSource.ByValue(Json.decodeFromString(algAndKey.second.toString())),
+        )
+        private val cfg = OpenId4VPConfig(
+            supportedClientIdPrefixes = listOf(
+                SupportedClientIdPrefix.RedirectUri,
+                SupportedClientIdPrefix.Preregistered(preRegisteredClient, preRegisteredClientFooBar),
+            ),
+            vpConfiguration = VPConfiguration(
+                vpFormatsSupported = VpFormatsSupported(
+                    VpFormatsSupported.SdJwtVc.HAIP,
+                    VpFormatsSupported.MsoMdoc(
+                        issuerAuthAlgorithms = listOf(CoseAlgorithm(-7)),
+                        deviceAuthAlgorithms = listOf(CoseAlgorithm(-7)),
+                    ),
+                ),
+            ),
+        )
+        private val clientAuthenticator = ClientAuthenticator(cfg)
+
+        @Test
+        fun `if request is signed by a pre-registered client, authentication succeeds`() =
+            runTest {
+                val (alg, key) = algAndKey
+                val request = UnvalidatedRequestObject(
+                    clientId = "testPreRegistered",
+                ).signed(alg, key)
+
+                val client = clientAuthenticator.authenticateClient(request)
+                assertEquals(AuthenticatedClient.Preregistered(preRegisteredClient), client)
+            }
+
+        @Test
+        fun `if client_id contains colon char and is not one of the known prefixes, fallback to pre-registered client prefix`() =
+            runTest {
+                val (alg, key) = algAndKey
+                val request = UnvalidatedRequestObject(
+                    clientId = "foo:bar",
+                ).signed(alg, key)
+
+                val authenticateClient =
+                    assertIs<AuthenticatedClient.Preregistered>(clientAuthenticator.authenticateClient(request))
+                assertEquals(preRegisteredClientFooBar, authenticateClient.preregisteredClient)
+            }
     }
 
     @DisplayName("when handling a request with `decentralized_identifier` prefix")
@@ -137,7 +191,7 @@ class ClientAuthenticatorTest {
         private val clientId = "decentralized_identifier:$originalClientId"
         private val keyUrl = AbsoluteDIDUrl.parse("$originalClientId#01").getOrThrow()
         private val algAndKey = randomKey()
-        private val cfg = SiopOpenId4VPConfig(
+        private val cfg = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(
                 SupportedClientIdPrefix.DecentralizedIdentifier { url ->
                     assertEquals(keyUrl.uri, url)
@@ -251,7 +305,7 @@ class ClientAuthenticatorTest {
         private val clientId = "someClient"
         private val algAndKey = randomKey()
 
-        private val cfg = SiopOpenId4VPConfig(
+        private val cfg = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(
                 SupportedClientIdPrefix.VerifierAttestation(AttestationIssuer.verifier),
             ),

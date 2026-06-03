@@ -2,11 +2,10 @@ import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinJvm
 import org.jetbrains.dokka.gradle.engine.parameters.VisibilityModifier
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
-import org.owasp.dependencycheck.gradle.extension.DependencyCheckExtension
 import java.net.URI
 
 object Meta {
-    const val BASE_URL = "https://github.com/eu-digital-identity-wallet/eudi-lib-jvm-siop-openid4vp-kt"
+    const val BASE_URL = "https://github.com/eu-digital-identity-wallet/eudi-lib-jvm-openid4vp-kt"
 }
 
 plugins {
@@ -26,6 +25,12 @@ repositories {
         url = uri("https://s01.oss.sonatype.org/content/repositories/snapshots/")
         mavenContent { snapshotsOnly() }
     }
+    maven {
+        url = uri("https://maven.waltid.dev/releases")
+        mavenContent {
+            releasesOnly()
+        }
+    }
 }
 
 dependencies {
@@ -33,6 +38,7 @@ dependencies {
     api(libs.ktor.client.core)
     api(libs.ktor.client.content.negotiation)
     api(libs.ktor.client.serialization)
+    api(libs.kotlinx.serialization.json)
     api(libs.ktor.serialization.kotlinx.json)
     implementation(libs.bouncy.castle)
     testImplementation(kotlin("test"))
@@ -47,6 +53,9 @@ dependencies {
     testImplementation(libs.tink) {
         because("Enable usage of EncryptionMethod XC20P in Example")
     }
+    testImplementation(libs.kotlinx.datetime)
+    testImplementation(libs.cose.java)
+    testImplementation(libs.waltid.mdoc.credentials)
 }
 
 java {
@@ -59,7 +68,7 @@ kotlin {
         vendor = JvmVendorSpec.ADOPTIUM
     }
     compilerOptions {
-        apiVersion = KotlinVersion.KOTLIN_2_1
+        apiVersion = KotlinVersion.DEFAULT
         optIn = listOf(
             "kotlinx.serialization.ExperimentalSerializationApi",
             "kotlin.contracts.ExperimentalContracts",
@@ -81,12 +90,8 @@ spotless {
     }
 }
 
-testing {
-    suites {
-        val test by getting(JvmTestSuite::class) {
-            useJUnitJupiter()
-        }
-    }
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.jar {
@@ -105,7 +110,7 @@ tasks.jar {
 //
 dokka {
     // used as project name in the header
-    moduleName = "SIOPv2 OpenId4VP"
+    moduleName = "OpenId4VP"
 
     dokkaSourceSets.main {
         // contains descriptions for the module and the packages
@@ -136,9 +141,10 @@ mavenPublishing {
     }
 }
 
-val nvdApiKey: String? = System.getenv("NVD_API_KEY") ?: properties["nvdApiKey"]?.toString()
-val dependencyCheckExtension = extensions.findByType(DependencyCheckExtension::class.java)
-dependencyCheckExtension?.apply {
+dependencyCheck {
     formats = mutableListOf("XML", "HTML")
-    nvd.apiKey = nvdApiKey ?: ""
+
+    nvd {
+        apiKey = System.getenv("NVD_API_KEY") ?: properties["nvdApiKey"]?.toString() ?: ""
+    }
 }

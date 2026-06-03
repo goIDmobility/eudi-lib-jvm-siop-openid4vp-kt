@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,6 @@ import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.http.*
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -103,7 +102,7 @@ internal class RequestFetcherTest {
     fun `request uri method post - decryption fails when jar is not encrypted with jwk in jwks`() = runTest {
         val clientId = "verifier"
         val jarEncryptionRequirement = EncryptionRequirement.Required(
-            supportedEncryptionAlgorithms = listOf(JWEAlgorithm.ECDH_ES_A256KW),
+            supportedEncryptionAlgorithms = listOf(JWEAlgorithm.ECDH_ES),
             supportedEncryptionMethods = listOf(EncryptionMethod.A256GCM),
             ephemeralEncryptionKeyCurve = Curve.P_521,
         )
@@ -146,7 +145,7 @@ internal class RequestFetcherTest {
     fun `request uri method post - fetch encrypted and signed request object`() = runTest {
         val clientId = "verifier"
         val jarEncryptionRequirement = EncryptionRequirement.Required(
-            supportedEncryptionAlgorithms = listOf(JWEAlgorithm.ECDH_ES_A256KW),
+            supportedEncryptionAlgorithms = listOf(JWEAlgorithm.ECDH_ES),
             supportedEncryptionMethods = listOf(EncryptionMethod.A256GCM),
             ephemeralEncryptionKeyCurve = Curve.P_521,
         )
@@ -185,8 +184,8 @@ internal class RequestFetcherTest {
     }
 }
 
-private fun config(clientId: String, jarEncryptionRequirement: EncryptionRequirement): SiopOpenId4VPConfig =
-    SiopOpenId4VPConfig(
+private fun config(clientId: String, jarEncryptionRequirement: EncryptionRequirement): OpenId4VPConfig =
+    OpenId4VPConfig(
         jarConfiguration = JarConfiguration(
             supportedAlgorithms = JWSAlgorithm.Family.EC.toList() - JWSAlgorithm.ES256K,
             supportedRequestUriMethods = SupportedRequestUriMethods.Post(
@@ -270,19 +269,19 @@ private fun MockEngine(
         if (null != encryptionAlgorithms) {
             assertEquals(
                 JsonArray(encryptionAlgorithms.map { JsonPrimitive(it.name) }),
-                walletMetadata["authorization_encryption_alg_values_supported"],
+                walletMetadata["request_object_encryption_alg_values_supported"],
             )
         } else {
-            assertNull(walletMetadata["authorization_encryption_alg_values_supported"])
+            assertNull(walletMetadata["request_object_encryption_alg_values_supported"])
         }
 
         if (null != encryptionMethods) {
             assertEquals(
                 JsonArray(encryptionMethods.map { JsonPrimitive(it.name) }),
-                walletMetadata["authorization_encryption_enc_values_supported"],
+                walletMetadata["request_object_encryption_enc_values_supported"],
             )
         } else {
-            assertNull(walletMetadata["authorization_encryption_enc_values_supported"])
+            assertNull(walletMetadata["request_object_encryption_enc_values_supported"])
         }
 
         val walletNonce = assertIs<String>(body.formData[OpenId4VPSpec.WALLET_NONCE])

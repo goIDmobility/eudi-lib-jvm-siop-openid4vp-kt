@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,14 +17,12 @@ package eu.europa.ec.eudi.openid4vp.internal.request
 
 import com.nimbusds.jose.EncryptionMethod
 import com.nimbusds.jose.JWEAlgorithm
-import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.JWK
 import com.nimbusds.jose.jwk.JWKSet
 import eu.europa.ec.eudi.openid4vp.*
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
@@ -32,7 +30,7 @@ class WalletMetaDataTest {
 
     @Test
     fun `test with jar encryption`() = runTest {
-        val config = SiopOpenId4VPConfig(
+        val config = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(SupportedClientIdPrefix.X509SanDns.NoValidation),
             vpConfiguration = VPConfiguration(
                 vpFormatsSupported = VpFormatsSupported(
@@ -54,12 +52,12 @@ class WalletMetaDataTest {
                 ),
             ),
         )
-        assertMetadata(config)
+        assertMetadata(config, "x509_san_dns:verifier.example.com")
     }
 
     @Test
     fun `test without jar encryption`() = runTest {
-        val config = SiopOpenId4VPConfig(
+        val config = OpenId4VPConfig(
             supportedClientIdPrefixes = listOf(SupportedClientIdPrefix.X509SanDns.NoValidation),
             vpConfiguration = VPConfiguration(
                 vpFormatsSupported = VpFormatsSupported(
@@ -75,11 +73,40 @@ class WalletMetaDataTest {
                 supportedRequestUriMethods = SupportedRequestUriMethods.Get,
             ),
         )
-        assertMetadata(config)
+        assertMetadata(config, "x509_san_dns:verifier.example.com")
     }
+
+    @Test
+    fun `when clientId permits signed Request Objects, request_object_signing_alg_values_supported MUST be included`() = runTest {
+        val config = OpenId4VPConfig(
+            supportedClientIdPrefixes = listOf(SupportedClientIdPrefix.X509SanDns.NoValidation),
+            vpConfiguration = VPConfiguration(
+                vpFormatsSupported = VpFormatsSupported(
+                    VpFormatsSupported.SdJwtVc.HAIP,
+                ),
+            ),
+        )
+        val walletMetaData = walletMetaData(config, "x509_san_dns:verifier.example.com", emptyList())
+        assertNotNull(walletMetaData["request_object_signing_alg_values_supported"])
+    }
+
+    @Test
+    fun `when clientId does not permit signed Request Objects, request_object_signing_alg_values_supported MUST NOT be included`() =
+        runTest {
+            val config = OpenId4VPConfig(
+                supportedClientIdPrefixes = listOf(SupportedClientIdPrefix.RedirectUri, SupportedClientIdPrefix.X509SanDns.NoValidation),
+                vpConfiguration = VPConfiguration(
+                    vpFormatsSupported = VpFormatsSupported(
+                        VpFormatsSupported.SdJwtVc.HAIP,
+                    ),
+                ),
+            )
+            val walletMetaData = walletMetaData(config, "redirect_uri:https://verifier.example.com/callback", emptyList())
+            assertNull(walletMetaData["request_object_signing_alg_values_supported"])
+        }
 }
 
-private suspend fun assertMetadata(config: SiopOpenId4VPConfig) {
+private suspend fun assertMetadata(config: OpenId4VPConfig, clientId: String) {
     val (encryptionRequirement, ephemeralJarEncryptionJwks) =
         config.jarConfiguration.supportedRequestUriMethods.isPostSupported()
             ?.let { requestUriMethodPost ->
@@ -89,7 +116,7 @@ private suspend fun assertMetadata(config: SiopOpenId4VPConfig) {
                 }
             } ?: (EncryptionRequirement.NotRequired to null)
 
-    val walletMetaData = walletMetaData(config, listOfNotNull(ephemeralJarEncryptionJwks))
+    val walletMetaData = walletMetaData(config, clientId, listOfNotNull(ephemeralJarEncryptionJwks))
         .also {
             println(jsonSupport.encodeToString(it))
         }
@@ -97,18 +124,24 @@ private suspend fun assertMetadata(config: SiopOpenId4VPConfig) {
     assertExpectedVpFormats(config.vpConfiguration.vpFormatsSupported, walletMetaData)
     assertClientIdPrefix(config.supportedClientIdPrefixes, walletMetaData)
     assertPresentationDefinitionUriSupported(walletMetaData)
-    assertJarSigning(config.jarConfiguration.supportedAlgorithms, walletMetaData)
+    assertJarSigning(config, clientId, walletMetaData)
     assertJarEncryption(encryptionRequirement, ephemeralJarEncryptionJwks, walletMetaData)
     assertResponseTypes(walletMetaData)
 }
 
-private fun assertJarSigning(supportedAlgorithms: List<JWSAlgorithm>, walletMetaData: JsonObject) {
+private fun assertJarSigning(config: OpenId4VPConfig, clientId: String, walletMetaData: JsonObject) {
+    val supportedAlgorithms = config.jarConfiguration.supportedAlgorithms
+    val permitsSignedRequestObjects = VerifierId.parse(clientId).getOrNull()?.prefix?.permitsSignedRequestObjects() ?: false
     val algs = walletMetaData["request_object_signing_alg_values_supported"]
-    assertIs<JsonArray>(algs)
-    assertContentEquals(
-        supportedAlgorithms.map { it.name },
-        algs.mapNotNull { it.jsonPrimitive.contentOrNull },
-    )
+    if (permitsSignedRequestObjects) {
+        assertIs<JsonArray>(algs)
+        assertContentEquals(
+            supportedAlgorithms.map { it.name },
+            algs.mapNotNull { it.jsonPrimitive.contentOrNull },
+        )
+    } else {
+        assertNull(algs)
+    }
 }
 
 private fun assertJarEncryption(
@@ -130,12 +163,12 @@ private fun assertJarEncryption(
             val jwks = assertIs<JsonObject>(walletMetadata["jwks"]).let { JWKSet.parse(jsonSupport.encodeToString(it)) }
             assertEquals(JWKSet(ephemeralJarEncryptionJwk).toPublicJWKSet(), jwks)
 
-            val encryptionAlgorithms = assertIs<JsonArray>(walletMetadata["authorization_encryption_alg_values_supported"]).map {
+            val encryptionAlgorithms = assertIs<JsonArray>(walletMetadata["request_object_encryption_alg_values_supported"]).map {
                 JWEAlgorithm.parse(it.jsonPrimitive.content)
             }
             assertEquals(encryptionRequirement.supportedEncryptionAlgorithms, encryptionAlgorithms)
 
-            val encryptionMethods = assertIs<JsonArray>(walletMetadata["authorization_encryption_enc_values_supported"]).map {
+            val encryptionMethods = assertIs<JsonArray>(walletMetadata["request_object_encryption_enc_values_supported"]).map {
                 EncryptionMethod.parse(it.jsonPrimitive.content)
             }
             assertEquals(encryptionRequirement.supportedEncryptionMethods, encryptionMethods)
@@ -158,7 +191,7 @@ private fun assertClientIdPrefix(
     if (supportedClientIdPrefixes.isNotEmpty()) {
         assertIs<JsonArray>(prefixes)
         assertContentEquals(
-            supportedClientIdPrefixes.map { it.prefix().value() },
+            supportedClientIdPrefixes.map { it.prefix().metadataValue },
             prefixes.mapNotNull { it.jsonPrimitive.contentOrNull },
         )
     } else {
@@ -214,8 +247,6 @@ private fun assertResponseTypes(walletMetadata: JsonObject) {
     assert(types.all { it is JsonPrimitive && it.isString }) { "'response_types_supported' does not contain strings only" }
 
     val values = types.map { it.jsonPrimitive.content }
-    assertEquals(3, values.size, "'unexpected number of 'response_types_supported'")
+    assertEquals(1, values.size, "'unexpected number of 'response_types_supported'")
     assert("vp_token" in values) { "'response_types_supported' misses 'vp_token'" }
-    assert("id_token" in values) { "'response_types_supported' misses 'id_token'" }
-    assert("vp_token id_token" in values) { "'response_types_supported' misses 'vp_token id_token'" }
 }

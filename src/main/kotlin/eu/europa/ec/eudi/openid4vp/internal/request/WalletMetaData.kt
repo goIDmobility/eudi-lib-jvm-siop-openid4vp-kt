@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,22 +17,27 @@ package eu.europa.ec.eudi.openid4vp.internal.request
 
 import com.nimbusds.jose.jwk.JWK
 import com.nimbusds.jose.jwk.JWKSet
-import eu.europa.ec.eudi.openid4vp.EncryptionRequirement
-import eu.europa.ec.eudi.openid4vp.OpenId4VPSpec
-import eu.europa.ec.eudi.openid4vp.SiopOpenId4VPConfig
+import eu.europa.ec.eudi.openid4vp.*
+import eu.europa.ec.eudi.openid4vp.ClientIdPrefix.*
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
 import eu.europa.ec.eudi.openid4vp.internal.toJsonObject
 import kotlinx.serialization.json.*
 
 private const val REQUEST_OBJECT_SIGNING_ALG_VALUES_SUPPORTED = "request_object_signing_alg_values_supported"
 private const val JWKS = "jwks"
+
+// JAR encryption
+private const val REQUEST_OBJECT_ENCRYPTION_ALG_VALUES_SUPPORTED = "request_object_encryption_alg_values_supported"
+private const val REQUEST_OBJECT_ENCRYPTION_ENC_VALUES_SUPPORTED = "request_object_encryption_enc_values_supported"
+
+// Response encryption
 private const val AUTHORIZATION_ENCRYPTION_ALG_VALUES_SUPPORTED = "authorization_encryption_alg_values_supported"
 private const val AUTHORIZATION_ENCRYPTION_ENC_VALUES_SUPPORTED = "authorization_encryption_enc_values_supported"
 
 private const val RESPONSE_TYPES_SUPPOERTED = "response_types_supported"
 private const val RESPONSE_MODES_SUPPORTED = "response_modes_supported"
 
-internal fun walletMetaData(cfg: SiopOpenId4VPConfig, keys: List<JWK>): JsonObject =
+internal fun walletMetaData(cfg: OpenId4VPConfig, clientId: String, keys: List<JWK>): JsonObject =
     buildJsonObject {
         //
         // Authorization Request signature and encryption parameters
@@ -41,8 +46,12 @@ internal fun walletMetaData(cfg: SiopOpenId4VPConfig, keys: List<JWK>): JsonObje
         //
 
         // Signature
-        putJsonArray(REQUEST_OBJECT_SIGNING_ALG_VALUES_SUPPORTED) {
-            cfg.jarConfiguration.supportedAlgorithms.forEach { alg -> add(alg.name) }
+        val permitsSignedRequestObjects =
+            VerifierId.parse(clientId).getOrNull()?.prefix?.permitsSignedRequestObjects() ?: false
+        if (permitsSignedRequestObjects) {
+            putJsonArray(REQUEST_OBJECT_SIGNING_ALG_VALUES_SUPPORTED) {
+                cfg.jarConfiguration.supportedAlgorithms.forEach { alg -> add(alg.name) }
+            }
         }
 
         // Encryption
@@ -50,12 +59,23 @@ internal fun walletMetaData(cfg: SiopOpenId4VPConfig, keys: List<JWK>): JsonObje
             val jarEncryption = requestUriMethodPost.jarEncryption
             if (jarEncryption is EncryptionRequirement.Required && keys.isNotEmpty()) {
                 put(JWKS, JWKSet(keys).toJSONObject(true).toJsonObject())
-                putJsonArray(AUTHORIZATION_ENCRYPTION_ALG_VALUES_SUPPORTED) {
+                putJsonArray(REQUEST_OBJECT_ENCRYPTION_ALG_VALUES_SUPPORTED) {
                     jarEncryption.supportedEncryptionAlgorithms.forEach { alg -> add(alg.name) }
                 }
-                putJsonArray(AUTHORIZATION_ENCRYPTION_ENC_VALUES_SUPPORTED) {
+                putJsonArray(REQUEST_OBJECT_ENCRYPTION_ENC_VALUES_SUPPORTED) {
                     jarEncryption.supportedEncryptionMethods.forEach { method -> add(method.name) }
                 }
+            }
+        }
+
+        // Response Encryption
+        val responseEncryptionConfiguration = cfg.responseEncryptionConfiguration
+        if (responseEncryptionConfiguration is ResponseEncryptionConfiguration.Supported) {
+            putJsonArray(AUTHORIZATION_ENCRYPTION_ALG_VALUES_SUPPORTED) {
+                responseEncryptionConfiguration.supportedAlgorithms.forEach { alg -> add(alg.name) }
+            }
+            putJsonArray(AUTHORIZATION_ENCRYPTION_ENC_VALUES_SUPPORTED) {
+                responseEncryptionConfiguration.supportedMethods.forEach { method -> add(method.name) }
             }
         }
 
@@ -65,13 +85,11 @@ internal fun walletMetaData(cfg: SiopOpenId4VPConfig, keys: List<JWK>): JsonObje
         put(OpenId4VPSpec.VP_FORMATS_SUPPORTED, jsonSupport.encodeToJsonElement(cfg.vpConfiguration.vpFormatsSupported))
         putJsonArray(OpenId4VPSpec.CLIENT_ID_PREFIXES_SUPPORTED) {
             cfg.supportedClientIdPrefixes.forEach { supportedClientIdPrefix ->
-                add(supportedClientIdPrefix.prefix().value())
+                add(supportedClientIdPrefix.prefix().metadataValue)
             }
         }
         putJsonArray(RESPONSE_TYPES_SUPPOERTED) {
             add("vp_token")
-            add("id_token")
-            add("vp_token id_token")
         }
 
         // TODO Investigate is this should be hardcoded, or
@@ -80,4 +98,15 @@ internal fun walletMetaData(cfg: SiopOpenId4VPConfig, keys: List<JWK>): JsonObje
             add("direct_post")
             add("direct_post.jwt")
         }
+    }
+
+internal val ClientIdPrefix.metadataValue: String
+    get() = when (this) {
+        PreRegistered -> OpenId4VPSpec.CLIENT_ID_PREFIX_PRE_REGISTERED
+        RedirectUri -> OpenId4VPSpec.CLIENT_ID_PREFIX_REDIRECT_URI
+        OpenIdFederation -> OpenId4VPSpec.CLIENT_ID_PREFIX_OPENID_FEDERATION
+        DecentralizedIdentifier -> OpenId4VPSpec.CLIENT_ID_PREFIX_DECENTRALIZED_IDENTIFIER
+        VerifierAttestation -> OpenId4VPSpec.CLIENT_ID_PREFIX_VERIFIER_ATTESTATION
+        X509SanDns -> OpenId4VPSpec.CLIENT_ID_PREFIX_X509_SAN_DNS
+        X509Hash -> OpenId4VPSpec.CLIENT_ID_PREFIX_X509_HASH
     }

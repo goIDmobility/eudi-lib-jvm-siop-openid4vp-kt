@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 European Commission
+ * Copyright (c) 2023-2026 European Commission
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import com.nimbusds.jose.JWSVerifier
 import com.nimbusds.jose.crypto.ECDHDecrypter
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.oauth2.sdk.id.Issuer
+import eu.europa.ec.eudi.openid4vp.OpenId4VPConfig.Companion.SelfIssued
 import eu.europa.ec.eudi.openid4vp.ResponseEncryptionConfiguration.NotSupported
 import eu.europa.ec.eudi.openid4vp.dcql.DCQL
 import kotlinx.serialization.json.JsonObject
@@ -216,9 +217,12 @@ sealed interface NonceOption {
     data object DoNotUse : NonceOption
 
     @JvmInline
-    value class Use(val byteLength: Int = 32) : NonceOption {
+    value class Use(val byteLength: Int = MINIMUM_NONCE_LENGTH) : NonceOption {
         init {
-            require(byteLength > 1) { "Byte length should be greater than 1" }
+            require(byteLength >= MINIMUM_NONCE_LENGTH) { "Byte length should be at least $MINIMUM_NONCE_LENGTH" }
+        }
+        companion object {
+            const val MINIMUM_NONCE_LENGTH: Int = 32
         }
     }
 }
@@ -263,7 +267,7 @@ sealed interface EncryptionRequirement : java.io.Serializable {
         }
 
         companion object {
-            val SUPPORTED_ENCRYPTION_ALGORITHMS: List<JWEAlgorithm> get() = ECDHDecrypter.SUPPORTED_ALGORITHMS.toList()
+            val SUPPORTED_ENCRYPTION_ALGORITHMS: List<JWEAlgorithm> get() = JWEAlgorithm.Family.ECDH_ES.toList()
             val SUPPORTED_ENCRYPTION_METHODS: List<EncryptionMethod> get() = ECDHDecrypter.SUPPORTED_ENCRYPTION_METHODS.toList()
             val SUPPORTED_EPHEMERAL_ENCRYPTION_KEY_CURVES: List<Curve> get() = ECDHDecrypter.SUPPORTED_ELLIPTIC_CURVES.toList()
         }
@@ -369,7 +373,7 @@ enum class ErrorDispatchPolicy : java.io.Serializable {
 }
 
 /**
- * Wallet configuration options for SIOP & OpenId4VP protocols.
+ * Wallet configuration options for OpenId4VP protocol.
  *
  * At minimum, a wallet configuration should define at least a [supportedClientIdPrefixes]
  *
@@ -384,7 +388,7 @@ enum class ErrorDispatchPolicy : java.io.Serializable {
  * @param supportedClientIdPrefixes the client id prefixes that are supported/trusted by the wallet
  * @param errorDispatchPolicy wallet's policy regarding error dispatching. Defaults to [ErrorDispatchPolicy.OnlyAuthenticatedClients].
  */
-data class SiopOpenId4VPConfig(
+data class OpenId4VPConfig(
     val issuer: Issuer? = SelfIssued,
     val jarConfiguration: JarConfiguration = JarConfiguration.Default,
     val responseEncryptionConfiguration: ResponseEncryptionConfiguration = NotSupported,
@@ -426,5 +430,8 @@ data class SiopOpenId4VPConfig(
     }
 }
 
-internal fun SiopOpenId4VPConfig.supportedClientIdPrefix(prefix: ClientIdPrefix): SupportedClientIdPrefix? =
+internal fun OpenId4VPConfig.supportedClientIdPrefix(prefix: ClientIdPrefix): SupportedClientIdPrefix? =
     supportedClientIdPrefixes.firstOrNull { it.prefix() == prefix }
+
+@Deprecated("Use OpenId4VPConfig instead", ReplaceWith("OpenId4VPConfig"))
+typealias SiopOpenId4VPConfig = OpenId4VPConfig
