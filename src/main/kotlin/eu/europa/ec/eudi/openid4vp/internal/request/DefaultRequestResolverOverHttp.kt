@@ -15,11 +15,8 @@
  */
 package eu.europa.ec.eudi.openid4vp.internal.request
 
-import com.nimbusds.jose.JWSObject
-import com.nimbusds.jwt.SignedJWT
 import eu.europa.ec.eudi.openid4vp.*
 import eu.europa.ec.eudi.openid4vp.internal.JwsJson
-import eu.europa.ec.eudi.openid4vp.internal.JwsJson.Companion.flatten
 import eu.europa.ec.eudi.openid4vp.internal.decodePayloadAs
 import eu.europa.ec.eudi.openid4vp.internal.ensure
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
@@ -28,7 +25,6 @@ import eu.europa.ec.eudi.openid4vp.internal.request.UnvalidatedRequest.JwtSecure
 import io.ktor.client.*
 import io.ktor.http.*
 import io.ktor.util.*
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import java.net.URI
@@ -61,25 +57,6 @@ internal value class TransactionDataTO(val value: JsonArray) {
     val values: List<String>
         get() = value.map { it.jsonPrimitive.content }
 }
-
-/**
- * The data of an OpenID4VP authorization request without any validation and regardless of the way they sent to the wallet.
- */
-@Serializable
-internal data class UnvalidatedRequestObject(
-    @SerialName("client_metadata") val clientMetaData: JsonObject? = null,
-    @SerialName(OpenId4VPSpec.NONCE) val nonce: String? = null,
-    @SerialName("client_id") val clientId: String? = null,
-    @SerialName("response_type") val responseType: String? = null,
-    @SerialName("response_mode") val responseMode: String? = null,
-    @SerialName(OpenId4VPSpec.RESPONSE_URI) val responseUri: String? = null,
-    @SerialName(OpenId4VPSpec.DCQL_QUERY) val dcqlQuery: JsonObject? = null,
-    @SerialName("redirect_uri") val redirectUri: String? = null,
-    @SerialName("scope") val scope: String? = null,
-    @SerialName("state") val state: String? = null,
-    @SerialName(OpenId4VPSpec.TRANSACTION_DATA) val transactionData: TransactionDataTO? = null,
-    @SerialName(OpenId4VPSpec.VERIFIER_INFO) val verifierInfo: VerifierInfoTO? = null,
-)
 
 enum class RequestUriMethod {
     GET, POST
@@ -192,34 +169,10 @@ internal sealed interface UnvalidatedRequest {
     }
 }
 
-internal sealed interface ReceivedRequest {
-    data class Unsigned(val requestObject: UnvalidatedRequestObject) : ReceivedRequest
-    data class Signed(val jwsJson: JwsJson) : ReceivedRequest {
-        companion object {
-            operator fun invoke(signedJwt: SignedJWT): Signed = Signed(JwsJson.from(signedJwt).getOrThrow())
-        }
-    }
-}
-
-/**
- * Decomposes a Nimbus [SignedJWT] into [JwsJson].
- */
-private fun JwsJson.Companion.from(signedJwt: SignedJWT): Result<JwsJson> = runCatchingCancellable {
-    require(signedJwt.state == JWSObject.State.SIGNED) { "JWS is not signed" }
-    val compactFormString =
-        "${signedJwt.header.toBase64URL()}.${signedJwt.payload.toBase64URL()}.${signedJwt.signature}"
-    JwsJson.from(compactFormString).getOrThrow()
-}
-
-internal fun ReceivedRequest.Signed.toSignedJwts(): List<SignedJWT> =
-    jwsJson.flatten().map {
-        SignedJWT.parse("${it.protected}.${it.payload}.${it.signature}")
-    }
-
-internal class DefaultAuthorizationRequestResolver(
+internal class DefaultRequestResolverOverHttp(
     private val openId4VPConfig: OpenId4VPConfig,
     private val httpClient: HttpClient,
-) : AuthorizationRequestResolver {
+) : AuthorizationRequestOverHttpResolver {
 
     override suspend fun resolveRequestUri(uri: String): Resolution =
         with(httpClient) {
@@ -240,7 +193,7 @@ internal class DefaultAuthorizationRequestResolver(
             } catch (e: AuthorizationRequestException) {
                 val dispatchDetails =
                     when (openId4VPConfig.errorDispatchPolicy) {
-                        ErrorDispatchPolicy.AllClients -> dispatchDetailsOrNull(fetchedRequest, openId4VPConfig)
+                        ErrorDispatchPolicy.AllClients -> dispatchErrorDetailsOrNull(fetchedRequest, openId4VPConfig)
                         ErrorDispatchPolicy.OnlyAuthenticatedClients -> null
                     }
                 return Resolution.Invalid(e.error, dispatchDetails)
@@ -250,7 +203,8 @@ internal class DefaultAuthorizationRequestResolver(
             try {
                 validateRequestObject(authenticatedRequest)
             } catch (e: AuthorizationRequestException) {
-                val dispatchDetails = dispatchDetailsOrNull(authenticatedRequest.requestObject, openId4VPConfig)
+                val dispatchDetails =
+                    dispatchErrorDetailsOrNull(authenticatedRequest.requestObject, authenticatedRequest.client, openId4VPConfig)
                 return Resolution.Invalid(e.error, dispatchDetails)
             }
 
@@ -259,7 +213,7 @@ internal class DefaultAuthorizationRequestResolver(
 
     private fun validateRequestObject(authenticatedRequest: AuthenticatedRequest): ResolvedRequestObject {
         val requestValidator = RequestObjectValidator(openId4VPConfig)
-        return requestValidator.validateRequestObject(authenticatedRequest)
+        return requestValidator.validateHttpRequestObject(authenticatedRequest)
     }
 
     private suspend fun HttpClient.fetchRequest(uri: String): ReceivedRequest {
@@ -268,22 +222,71 @@ internal class DefaultAuthorizationRequestResolver(
         return requestFetcher.fetchRequest(unvalidatedRequest)
     }
 
-    private suspend fun HttpClient.authenticateRequest(receivedRequest: ReceivedRequest): AuthenticatedRequest {
-        val requestAuthenticator = RequestAuthenticator(openId4VPConfig, this)
-        return requestAuthenticator.authenticate(receivedRequest)
+    private suspend fun authenticateRequest(receivedRequest: ReceivedRequest): AuthenticatedRequest {
+        val requestAuthenticator = RequestAuthenticator(openId4VPConfig)
+        return requestAuthenticator.authenticateRequestOverHttp(receivedRequest)
+    }
+}
+
+/**
+ * Checks that the URI in the [responseMode] belongs to the [client], mirroring the checks
+ * in [RequestObjectValidator.requiredResponseModeOverHttp].
+ *
+ * @return `true` if the URI matches, `false` otherwise.
+ */
+private fun uriMatchesClient(
+    responseMode: ResponseMode,
+    client: AuthenticatedClient,
+): Boolean {
+    val uri: URI = when (responseMode) {
+        is ResponseMode.DirectPost -> responseMode.responseURI.toURI()
+        is ResponseMode.DirectPostJwt -> responseMode.responseURI.toURI()
+        is ResponseMode.Query -> responseMode.redirectUri
+        is ResponseMode.QueryJwt -> responseMode.redirectUri
+        is ResponseMode.Fragment -> responseMode.redirectUri
+        is ResponseMode.FragmentJwt -> responseMode.redirectUri
+        ResponseMode.DCApi,
+        ResponseMode.DCApiJwt,
+        -> return false
+    }
+    return when (client) {
+        is AuthenticatedClient.Preregistered -> true
+        is AuthenticatedClient.RedirectUri -> client.clientId == uri
+        is AuthenticatedClient.DecentralizedIdentifier -> true
+        is AuthenticatedClient.VerifierAttestation -> {
+            val allowedUris = when (responseMode) {
+                is ResponseMode.Query,
+                is ResponseMode.QueryJwt,
+                is ResponseMode.Fragment,
+                is ResponseMode.FragmentJwt,
+                -> client.claims.redirectUris
+                is ResponseMode.DirectPost,
+                is ResponseMode.DirectPostJwt,
+                -> client.claims.responseUris
+                ResponseMode.DCApi,
+                ResponseMode.DCApiJwt,
+                -> return false
+            }
+            allowedUris == null || uri.toString() in allowedUris
+        }
+
+        is AuthenticatedClient.X509SanDns -> client.clientId == uri.host
+        is AuthenticatedClient.X509Hash -> true
+        is AuthenticatedClient.Origin -> false
     }
 }
 
 /**
  * Creates an invalid resolution for errors that manifested while trying to authenticate a Client.
  */
-private fun dispatchDetailsOrNull(
+private fun dispatchErrorDetailsOrNull(
     fetchedRequest: ReceivedRequest,
     openId4VPConfig: OpenId4VPConfig,
 ): ErrorDispatchDetails? =
     when (fetchedRequest) {
-        is ReceivedRequest.Signed -> dispatchDetailsOrNull(fetchedRequest.jwsJson, openId4VPConfig)
-        is ReceivedRequest.Unsigned -> dispatchDetailsOrNull(fetchedRequest.requestObject, openId4VPConfig)
+        is ReceivedRequest.Signed -> dispatchErrorDetailsOrNull(fetchedRequest.jwsJson, openId4VPConfig)
+        is ReceivedRequest.Unsigned -> dispatchErrorDetailsOrNull(fetchedRequest.requestObject, null, openId4VPConfig)
+        is ReceivedRequest.MultiSigned -> error("Multisigned requests not expected over redirects")
     }
 
 /**
@@ -294,12 +297,17 @@ private fun dispatchDetailsOrNull(
  * * the response mode does not require encryption
  * * the response mode requires encryption, and we have resolved Client metadata that contains encryption parameters compatible with
  * the configuration of the Wallet
+ *
+ * When [client] is provided, the URI in the response mode is validated against the client identity,
+ * mirroring the checks in [RequestObjectValidator.requiredResponseModeOverHttp].
  */
-private fun dispatchDetailsOrNull(
+private fun dispatchErrorDetailsOrNull(
     unvalidatedRequest: UnvalidatedRequestObject,
+    client: AuthenticatedClient?,
     openId4VPConfig: OpenId4VPConfig,
 ): ErrorDispatchDetails? {
     return unvalidatedRequest.responseMode()?.let { responseMode ->
+        if (client != null && !uriMatchesClient(responseMode, client)) return null
         val responseEncryptionSpecification =
             unvalidatedRequest.responseEncryptionSpecification(openId4VPConfig, responseMode)
         ErrorDispatchDetails(
@@ -324,7 +332,7 @@ private fun UnvalidatedRequestObject.responseEncryptionSpecification(
                 responseMode,
                 null,
                 openId4VPConfig.responseEncryptionConfiguration,
-                openId4VPConfig.vpConfiguration.vpFormatsSupported,
+                openId4VPConfig.vpFormatsSupported,
             )
         }
         validatedClientMetadata.responseEncryptionSpecification
@@ -332,36 +340,47 @@ private fun UnvalidatedRequestObject.responseEncryptionSpecification(
 }
 
 private fun UnvalidatedRequestObject.responseMode(): ResponseMode? {
-    fun UnvalidatedRequestObject.responseUri(): URL? =
-        responseUri?.let {
-            runCatchingCancellable { URL(it) }.getOrNull()
-        }
+    fun responseUri(): URL? =
+        responseUri?.asHttpsURL()?.getOrNull()
 
-    fun UnvalidatedRequestObject.redirectUri(): URI? =
-        redirectUri?.let {
-            runCatchingCancellable { URI.create(it) }.getOrNull()
-        }
+    fun redirectUri(): URI? =
+        redirectUri?.asHttpsURI()?.getOrNull()
 
     return when (responseMode) {
-        "direct_post" -> responseUri()?.let { ResponseMode.DirectPost(it) }
-        "direct_post.jwt" -> responseUri()?.let { ResponseMode.DirectPostJwt(it) }
-        "query" -> redirectUri()?.let { ResponseMode.Query(it) }
-        "query.jwt" -> redirectUri()?.let { ResponseMode.QueryJwt(it) }
-        null, "fragment" -> redirectUri()?.let { ResponseMode.Fragment(it) }
-        "fragment.jwt" -> redirectUri()?.let { ResponseMode.FragmentJwt(it) }
+        "direct_post" ->
+            if (redirectUri != null) null
+            else responseUri()?.let { ResponseMode.DirectPost(it) }
+
+        "direct_post.jwt" ->
+            if (redirectUri != null) null
+            else responseUri()?.let { ResponseMode.DirectPostJwt(it) }
+
+        "query" ->
+            if (responseUri != null) null
+            else redirectUri()?.let { ResponseMode.Query(it) }
+
+        "query.jwt" ->
+            if (responseUri != null) null
+            else redirectUri()?.let { ResponseMode.QueryJwt(it) }
+
+        null, "fragment" ->
+            if (responseUri != null) null
+            else redirectUri()?.let { ResponseMode.Fragment(it) }
+
+        "fragment.jwt" ->
+            if (responseUri != null) null
+            else redirectUri()?.let { ResponseMode.FragmentJwt(it) }
+
         else -> null
     }
 }
 
-private fun dispatchDetailsOrNull(
+private fun dispatchErrorDetailsOrNull(
     jwsJson: JwsJson,
     openId4VPConfig: OpenId4VPConfig,
 ): ErrorDispatchDetails? =
     runCatchingCancellable {
-        dispatchDetailsOrNull(
-            jwsJson.decodePayloadAs<UnvalidatedRequestObject>(),
-            openId4VPConfig,
-        )
+        dispatchErrorDetailsOrNull(jwsJson.decodePayloadAs<UnvalidatedRequestObject>(), null, openId4VPConfig)
     }.getOrNull()
 
 private fun URI.toKtorUrl(): Url = URLBuilder().takeFrom(this.toString()).build()

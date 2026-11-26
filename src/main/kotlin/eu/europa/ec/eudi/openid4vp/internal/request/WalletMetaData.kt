@@ -18,7 +18,6 @@ package eu.europa.ec.eudi.openid4vp.internal.request
 import com.nimbusds.jose.jwk.JWK
 import com.nimbusds.jose.jwk.JWKSet
 import eu.europa.ec.eudi.openid4vp.*
-import eu.europa.ec.eudi.openid4vp.ClientIdPrefix.*
 import eu.europa.ec.eudi.openid4vp.internal.jsonSupport
 import eu.europa.ec.eudi.openid4vp.internal.toJsonObject
 import kotlinx.serialization.json.*
@@ -40,6 +39,12 @@ private const val RESPONSE_MODES_SUPPORTED = "response_modes_supported"
 internal fun walletMetaData(cfg: OpenId4VPConfig, clientId: String, keys: List<JWK>): JsonObject =
     buildJsonObject {
         //
+        // Authorization Server Metadata
+        //
+        val issuer = checkNotNull(cfg.signedRequestConfiguration.supportedRequestUriMethods.isPostSupported()?.issuer)
+        put(RFC8414.ISSUER, issuer.value)
+
+        //
         // Authorization Request signature and encryption parameters
         // Uses properties defined in JAR and JARM specs
         // https://openid.net/specs/openid-4-verifiable-presentations-1_0.html#name-request-uri-method-post
@@ -50,12 +55,12 @@ internal fun walletMetaData(cfg: OpenId4VPConfig, clientId: String, keys: List<J
             VerifierId.parse(clientId).getOrNull()?.prefix?.permitsSignedRequestObjects() ?: false
         if (permitsSignedRequestObjects) {
             putJsonArray(REQUEST_OBJECT_SIGNING_ALG_VALUES_SUPPORTED) {
-                cfg.jarConfiguration.supportedAlgorithms.forEach { alg -> add(alg.name) }
+                cfg.signedRequestConfiguration.supportedAlgorithms.forEach { alg -> add(alg.name) }
             }
         }
 
         // Encryption
-        cfg.jarConfiguration.supportedRequestUriMethods.isPostSupported()?.let { requestUriMethodPost ->
+        cfg.signedRequestConfiguration.supportedRequestUriMethods.isPostSupported()?.let { requestUriMethodPost ->
             val jarEncryption = requestUriMethodPost.jarEncryption
             if (jarEncryption is EncryptionRequirement.Required && keys.isNotEmpty()) {
                 put(JWKS, JWKSet(keys).toJSONObject(true).toJsonObject())
@@ -82,10 +87,10 @@ internal fun walletMetaData(cfg: OpenId4VPConfig, clientId: String, keys: List<J
         //
         // OpenIdVP
         //
-        put(OpenId4VPSpec.VP_FORMATS_SUPPORTED, jsonSupport.encodeToJsonElement(cfg.vpConfiguration.vpFormatsSupported))
+        put(OpenId4VPSpec.VP_FORMATS_SUPPORTED, jsonSupport.encodeToJsonElement(cfg.vpFormatsSupported))
         putJsonArray(OpenId4VPSpec.CLIENT_ID_PREFIXES_SUPPORTED) {
             cfg.supportedClientIdPrefixes.forEach { supportedClientIdPrefix ->
-                add(supportedClientIdPrefix.prefix().metadataValue)
+                add(supportedClientIdPrefix.metadataValue())
             }
         }
         putJsonArray(RESPONSE_TYPES_SUPPOERTED) {
@@ -98,15 +103,4 @@ internal fun walletMetaData(cfg: OpenId4VPConfig, clientId: String, keys: List<J
             add("direct_post")
             add("direct_post.jwt")
         }
-    }
-
-internal val ClientIdPrefix.metadataValue: String
-    get() = when (this) {
-        PreRegistered -> OpenId4VPSpec.CLIENT_ID_PREFIX_PRE_REGISTERED
-        RedirectUri -> OpenId4VPSpec.CLIENT_ID_PREFIX_REDIRECT_URI
-        OpenIdFederation -> OpenId4VPSpec.CLIENT_ID_PREFIX_OPENID_FEDERATION
-        DecentralizedIdentifier -> OpenId4VPSpec.CLIENT_ID_PREFIX_DECENTRALIZED_IDENTIFIER
-        VerifierAttestation -> OpenId4VPSpec.CLIENT_ID_PREFIX_VERIFIER_ATTESTATION
-        X509SanDns -> OpenId4VPSpec.CLIENT_ID_PREFIX_X509_SAN_DNS
-        X509Hash -> OpenId4VPSpec.CLIENT_ID_PREFIX_X509_HASH
     }

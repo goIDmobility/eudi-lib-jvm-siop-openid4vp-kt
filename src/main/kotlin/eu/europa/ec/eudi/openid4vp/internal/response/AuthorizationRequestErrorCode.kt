@@ -15,6 +15,7 @@
  */
 package eu.europa.ec.eudi.openid4vp.internal.response
 
+import eu.europa.ec.eudi.openid4vp.AuthorizationPolicyValidationError
 import eu.europa.ec.eudi.openid4vp.AuthorizationRequestError
 import eu.europa.ec.eudi.openid4vp.HttpError
 import eu.europa.ec.eudi.openid4vp.RequestValidationError.*
@@ -132,6 +133,13 @@ internal enum class AuthorizationRequestErrorCode(val code: String) {
                 is InvalidVerifierInfo,
                 MissingClientMetadataJwks,
                 is ClientMetadataJwksUnparsable,
+                MissingExpectedOrigins,
+                MultiSignedRequestsNotSupported,
+                NoMatchingClientPrefixInMultiSignedRequest,
+                UnexpectedOrigin,
+                UnsupportedDcApiExchangeProtocol,
+                is DcApiExchangeProtocolNotMatchesReceivedRequest,
+                is AuthorizationPolicyValidationError,
                 -> INVALID_REQUEST
 
                 InvalidClientId, UnsupportedClientIdPrefix -> INVALID_CLIENT

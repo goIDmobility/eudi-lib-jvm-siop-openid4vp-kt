@@ -17,6 +17,8 @@ package eu.europa.ec.eudi.openid4vp.internal.request
 
 import eu.europa.ec.eudi.openid4vp.*
 import eu.europa.ec.eudi.openid4vp.RequestValidationError.*
+import eu.europa.ec.eudi.openid4vp.SupportedTransactionDataType.MsoMdoc
+import eu.europa.ec.eudi.openid4vp.SupportedTransactionDataType.SdJwtVc
 import eu.europa.ec.eudi.openid4vp.dcql.DCQL
 import eu.europa.ec.eudi.openid4vp.internal.ensure
 import eu.europa.ec.eudi.openid4vp.internal.ensureNotNull
@@ -28,6 +30,35 @@ import java.net.URL
 
 internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConfig) {
 
+    fun validateDCApiRequestObject(origin: String, request: AuthenticatedRequest, isSigned: Boolean): ResolvedRequestObject {
+        val (client, requestObject) = request
+
+        ensureVpTokenResponseType(requestObject)
+        val nonce = requiredNonce(requestObject)
+        val scope = requiredScope(requestObject)
+        val nonOpenIdScope = with(Scope) { scope.getOrNull()?.items()?.filter { it != OpenId }?.mergeOrNull() }
+        val query = requiredDcqlQuery(requestObject, nonOpenIdScope, openId4VPConfig.vpFormatsSupported)
+        val responseMode = requiredResponseModeOverDCApi(requestObject)
+        val clientMetaData = optionalClientMetaData(responseMode, query, requestObject)
+        val transactionData = optionalTransactionData(requestObject, query)
+        val verifierInfo = optionalVerifierInfo(query, requestObject)
+        if (isSigned) {
+            requireExpectedOrigins(origin, requestObject)
+        }
+
+        return ResolvedRequestObject(
+            client = client.toClient(),
+            responseMode = responseMode,
+            nonce = nonce,
+            responseEncryptionSpecification = clientMetaData?.responseEncryptionSpecification,
+            vpFormatsSupported = clientMetaData?.vpFormatsSupported,
+            query = query,
+            transactionData = transactionData,
+            verifierInfo = verifierInfo,
+            state = null,
+        )
+    }
+
     /**
      * Validates that the given [request] represents a valid [ResolvedRequestObject].
      *
@@ -37,7 +68,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
      * raises an AuthorizationRequestException. Validation rules violations are reported using [AuthorizationRequestError]
      * wrapped inside the [specific exception][AuthorizationRequestException]
      */
-    fun validateRequestObject(request: AuthenticatedRequest): ResolvedRequestObject {
+    fun validateHttpRequestObject(request: AuthenticatedRequest): ResolvedRequestObject {
         val (client, requestObject) = request
 
         ensureVpTokenResponseType(requestObject)
@@ -45,8 +76,8 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
         val nonOpenIdScope = with(Scope) { scope.getOrNull()?.items()?.filter { it != OpenId }?.mergeOrNull() }
         val state = requestObject.state
         val nonce = requiredNonce(requestObject)
-        val responseMode = requiredResponseMode(client, requestObject)
-        val query = requiredDcqlQuery(requestObject, nonOpenIdScope, openId4VPConfig.vpConfiguration.vpFormatsSupported)
+        val responseMode = requiredResponseModeOverHttp(client, requestObject)
+        val query = requiredDcqlQuery(requestObject, nonOpenIdScope, openId4VPConfig.vpFormatsSupported)
         val transactionData = optionalTransactionData(requestObject, query)
         val verifierInfo = optionalVerifierInfo(query, requestObject)
         val clientMetaData = optionalClientMetaData(responseMode, query, requestObject)
@@ -110,7 +141,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
 
     private fun lookupKnownDCQLQueries(scope: Scope): DCQL {
         scope.items().forEach { item ->
-            openId4VPConfig.vpConfiguration.knownDCQLQueriesPerScope[item.value]
+            openId4VPConfig.knownDCQLQueriesPerScope[item.value]
                 ?.let { return it }
         }
         throw ResolutionError.UnknownScope(scope).asException()
@@ -124,7 +155,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
             runCatchingCancellable {
                 unresolvedTransactionData.values.map { unresolved ->
                     val transactionData = TransactionData.parse(unresolved, query).getOrThrow()
-                    transactionData.ensureSupported(openId4VPConfig.vpConfiguration.supportedTransactionDataTypes)
+                    transactionData.ensureSupported(openId4VPConfig.supportedTransactionDataTypes)
                     transactionData
                 }
             }.getOrElse { error -> throw ResolutionError.InvalidTransactionData(error).asException() }
@@ -157,7 +188,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
         return verifierInfo
     }
 
-    private fun requiredResponseMode(
+    private fun requiredResponseModeOverHttp(
         client: AuthenticatedClient,
         unvalidated: UnvalidatedRequestObject,
     ): ResponseMode {
@@ -213,6 +244,10 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
                     is ResponseMode.FragmentJwt,
                     -> client.claims.redirectUris
 
+                    ResponseMode.DCApi,
+                    ResponseMode.DCApiJwt,
+                    -> error("Unsupported response mode $responseMode")
+
                     is ResponseMode.DirectPost,
                     is ResponseMode.DirectPostJwt,
                     -> client.claims.responseUris
@@ -229,8 +264,20 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
             }
 
             is AuthenticatedClient.X509Hash -> Unit
+
+            is AuthenticatedClient.Origin ->
+                throw IllegalStateException("Origin client is not supported for response_mode: $responseMode")
         }
 
+        return responseMode
+    }
+
+    private fun requiredResponseModeOverDCApi(unvalidated: UnvalidatedRequestObject): ResponseMode {
+        val responseMode = when (unvalidated.responseMode) {
+            "dc_api" -> ResponseMode.DCApi
+            "dc_api.jwt" -> ResponseMode.DCApiJwt
+            else -> throw UnsupportedResponseMode(unvalidated.responseMode).asException()
+        }
         return responseMode
     }
 
@@ -238,7 +285,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
      * Makes sure that [unvalidated] contains a not-null scope
      *
      * @param unvalidated the request to validate
-     * @return the scope or [RequestValidationError.MissingScope]
+     * @return the scope or [MissingScope]
      */
     private fun requiredScope(unvalidated: UnvalidatedRequestObject): Result<Scope> {
         val scope = unvalidated.scope?.let { Scope.make(it) }
@@ -250,7 +297,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
      * Makes sure that [unvalidated] contains a not-null nonce
      *
      * @param unvalidated the request to validate
-     * @return the nonce or [RequestValidationError.MissingNonce]
+     * @return the nonce or [MissingNonce]
      */
     private fun requiredNonce(unvalidated: UnvalidatedRequestObject): String =
         ensureNotNull(unvalidated.nonce) { MissingNonce.asException() }
@@ -258,7 +305,6 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
     /**
      * Verifier that [unvalidated] contains the supported `vp_token` `response_type`.
      *
-     * @throws [RequestValidationError.MissingResponseType] if [unvalidated] contains no `response_type`
      * @throws [RequestValidationError.UnsupportedResponseType] if [unvalidated] contains an unsupported `response_type`
      */
     private fun ensureVpTokenResponseType(unvalidated: UnvalidatedRequestObject) {
@@ -291,7 +337,7 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
                     responseMode,
                     query,
                     openId4VPConfig.responseEncryptionConfiguration,
-                    openId4VPConfig.vpConfiguration.vpFormatsSupported,
+                    openId4VPConfig.vpFormatsSupported,
                 )
             }
 
@@ -301,6 +347,18 @@ internal class RequestObjectValidator(private val openId4VPConfig: OpenId4VPConf
                 }
                 null
             }
+        }
+    }
+
+    private fun requireExpectedOrigins(
+        origin: String,
+        requestObject: UnvalidatedRequestObject,
+    ) {
+        ensure(requestObject.expectedOrigins != null) {
+            MissingExpectedOrigins.asException()
+        }
+        ensure(origin in requestObject.expectedOrigins) {
+            UnexpectedOrigin.asException()
         }
     }
 }
@@ -317,6 +375,7 @@ private fun AuthenticatedClient.toClient(): Client =
         is AuthenticatedClient.VerifierAttestation -> Client.VerifierAttestation(clientId)
         is AuthenticatedClient.X509SanDns -> Client.X509SanDns(clientId, chain[0])
         is AuthenticatedClient.X509Hash -> Client.X509Hash(clientId, chain[0])
+        is AuthenticatedClient.Origin -> Client.Origin(clientId)
     }
 
 private fun ResponseMode.uri(): URI = when (this) {
@@ -326,24 +385,39 @@ private fun ResponseMode.uri(): URI = when (this) {
     is ResponseMode.FragmentJwt -> redirectUri
     is ResponseMode.Query -> redirectUri
     is ResponseMode.QueryJwt -> redirectUri
+    ResponseMode.DCApi,
+    ResponseMode.DCApiJwt,
+    -> error("No uri for response mode $this")
 }
 
 private fun TransactionData.ensureSupported(supportedTransactionDataTypes: List<SupportedTransactionDataType>) =
     when (this) {
-        is TransactionData.SdJwtVc -> ensureSupported(supportedTransactionDataTypes)
+        is TransactionData.SdJwtVc -> ensureSdJwtVcSupported(supportedTransactionDataTypes.ofType<SdJwtVc>())
+        is TransactionData.MsoMdoc -> ensureMsoMdocSupported(supportedTransactionDataTypes.ofType<MsoMdoc>())
     }
 
-private fun TransactionData.SdJwtVc.ensureSupported(supportedTransactionDataTypes: List<SupportedTransactionDataType>) {
+private inline fun <reified T : SupportedTransactionDataType> List<SupportedTransactionDataType>.ofType(): List<T> =
+    this.filterIsInstance<T>()
+
+private fun TransactionData.SdJwtVc.ensureSdJwtVcSupported(supportedTransactionDataTypes: List<SdJwtVc>) {
     val type = this.type
 
     val supportedType = supportedTransactionDataTypes.firstOrNull { it.type == type }
-    require(supportedType is SupportedTransactionDataType.SdJwtVc) {
-        "Unsupported Transaction Data '${OpenId4VPSpec.TRANSACTION_DATA_TYPE}': '$type'"
+    requireNotNull(supportedType) {
+        "Unsupported sd-jwt-vc Transaction Data '${OpenId4VPSpec.TRANSACTION_DATA_TYPE}': '$type'"
     }
 
     val hashAlgorithms = this.hashAlgorithmsOrDefault
     val supportedHashAlgorithms = supportedType.hashAlgorithms
     require(supportedHashAlgorithms.intersect(hashAlgorithms).isNotEmpty()) {
-        "Unsupported Transaction Data '${OpenId4VPSpec.TRANSACTION_DATA_HASH_ALGORITHMS}': '$hashAlgorithms'"
+        "Unsupported sd-jwt-vc Transaction Data '${OpenId4VPSpec.TRANSACTION_DATA_HASH_ALGORITHMS}': '$hashAlgorithms'"
+    }
+}
+
+private fun TransactionData.MsoMdoc.ensureMsoMdocSupported(supportedTransactionDataTypes: List<MsoMdoc>) {
+    val type = this.type
+    val supportedType = supportedTransactionDataTypes.firstOrNull { it.type == type }
+    requireNotNull(supportedType) {
+        "Unsupported mso-mdoc Transaction Data '${OpenId4VPSpec.TRANSACTION_DATA_TYPE}': '$type'"
     }
 }
