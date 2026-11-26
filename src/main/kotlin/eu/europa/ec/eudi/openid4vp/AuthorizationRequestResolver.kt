@@ -328,6 +328,15 @@ sealed interface AuthorizationRequestError : java.io.Serializable
 data class HttpError(val cause: Throwable) : AuthorizationRequestError
 
 /**
+ * The End-User did not give consent to share the requested Credentials with the Verifier,
+ * or the Wallet did not have the requested Credentials. Dispatched as `access_denied`.
+ */
+data object AccessDenied : AuthorizationRequestError {
+    @Suppress("unused")
+    private fun readResolve(): Any = AccessDenied
+}
+
+/**
  * Validation errors that can occur while validating an authorization request
  */
 sealed interface RequestValidationError : AuthorizationRequestError {

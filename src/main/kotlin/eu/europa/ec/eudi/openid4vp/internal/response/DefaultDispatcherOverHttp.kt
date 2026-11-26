@@ -93,7 +93,12 @@ internal class DefaultDispatcherOverHttp(
         val redirectUri = response.parseRedirectUri()
         return when {
             response.status.isSuccess() -> DispatchOutcome.VerifierResponse.Accepted(redirectUri)
-            else -> DispatchOutcome.VerifierResponse.Rejected(redirectUri)
+            else -> DispatchOutcome.VerifierResponse.Rejected(
+                domain = url.host,
+                statusCode = response.status.value,
+                responseBody = runCatching { response.bodyAsText() }.getOrNull(),
+                redirectURI = redirectUri,
+            )
         }
     }
 

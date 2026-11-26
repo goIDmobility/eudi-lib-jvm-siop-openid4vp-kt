@@ -15,6 +15,7 @@
  */
 package eu.europa.ec.eudi.openid4vp.internal.response
 
+import eu.europa.ec.eudi.openid4vp.AccessDenied
 import eu.europa.ec.eudi.openid4vp.AuthorizationPolicyValidationError
 import eu.europa.ec.eudi.openid4vp.AuthorizationRequestError
 import eu.europa.ec.eudi.openid4vp.HttpError
@@ -155,6 +156,8 @@ internal enum class AuthorizationRequestErrorCode(val code: String) {
                 is InvalidTransactionData -> INVALID_TRANSACTION_DATA
 
                 ClientVpFormatsNotSupportedFromWallet -> VP_FORMATS_NOT_SUPPORTED
+               is AccessDenied -> ACCESS_DENIED
+
             }
         }
     }

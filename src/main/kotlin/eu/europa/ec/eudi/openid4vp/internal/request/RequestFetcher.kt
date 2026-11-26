@@ -96,7 +96,9 @@ internal class RequestFetcher(
                 } else null
 
             val jwt = httpClient.postForJAR(requestUri, walletNonce, walletMetaData)
-            val signedJwt = if (postOptions.jarEncryption is EncryptionRequirement.Required) {
+            // Only decrypt when the verifier actually sent a JWE (5 segments). A plain signed JWT
+            // (3 segments) is accepted as-is; its signature is still verified by ensureValid.
+            val signedJwt = if (postOptions.jarEncryption is EncryptionRequirement.Required && jwt.isJwe()) {
                 jwt.decrypt(ephemeralJarEncryptionKey!!, postOptions.jarEncryption).getOrThrow()
             } else jwt
 
@@ -208,6 +210,9 @@ private fun HttpRequestBuilder.addAcceptContentTypeJwt() {
 }
 
 private const val CONTENT_TYPE_JWT = "JWT"
+
+/** A compact JWE has five dot-separated segments; a compact JWS/JWT has three. */
+private fun Jwt.isJwe(): Boolean = count { it == '.' } == 4
 
 private fun Jwt.decrypt(recipientKey: ECKey, jarEncryption: EncryptionRequirement.Required): Result<Jwt> = runCatchingCancellable {
     val jwe = JWEObject.parse(this)

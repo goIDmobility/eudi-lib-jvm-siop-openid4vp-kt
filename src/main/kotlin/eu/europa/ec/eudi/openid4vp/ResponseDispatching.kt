@@ -70,7 +70,12 @@ sealed interface DispatchOutcome : java.io.Serializable {
          * redirect the user agent, as defined by OpenID4VP. The Response URI MAY return the
          * redirect_uri parameter in response to error responses.
          */
-        data class Rejected(val redirectURI: URI?) : VerifierResponse
+        data class Rejected(
+            val redirectURI: URI?,
+            val domain: String,
+            val statusCode: Int? = null,
+            val responseBody: String? = null,
+        ) : VerifierResponse
     }
 }
 
